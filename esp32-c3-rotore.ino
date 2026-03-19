@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════
-//  ESP32-C3 HAM-IV ROTATOR CONTROLLER v3.2
+//  ESP32-C3 HAM-IV ROTATOR CONTROLLER v3.3
 //  Dual WiFi: Access Point + Connessione a Router
 //  + Web Interface + USB Seriale + OVERLAP 0°-450°
 //  + Offset % e gradi
@@ -70,6 +70,7 @@ void requestStopMotor();
 void emergencyHalt();
 void startGoTo(float target);
 void processCommand(String cmd);
+void handleCommandAlt();
 void startCalibration();
 void saveCalibration();
 void sendDiagnostics();
@@ -153,6 +154,10 @@ float displayAzimuth    = 0.0;   // 0-450 gradi reali
 float compassAzimuth    = 0.0;   // 0-360 per la bussola
 bool  overlapActive     = false;  // true se >360°
 int   lastStableADC     = 0;
+
+float smoothingFactor   = 0.15;  // EMA: 0.01=molto liscio, 1.0=nessun filtro
+float relayCompensation = 17.0;  // Compensazione caduta gradi quando relè attivo (°)
+int   brakeDelayRuntime = 500;   // Ritardo freno regolabile via comando DELAY (ms)
 
 unsigned long rotationStart = 0;
 
@@ -287,13 +292,15 @@ body{font-family:'Segoe UI',sans-serif;background:#0a0a0a;color:#fff;min-height:
 .scan-item .rssi{color:#888}
 .offset-row{display:flex;gap:10px;margin:8px 0}
 .offset-row .form-group{flex:1;margin:0}
+input[type=range]{width:100%;-webkit-appearance:none;height:6px;border-radius:3px;background:#333;outline:none;margin:8px 0}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:#00ff88;cursor:pointer}
 </style>
 </head>
 <body>
 
 <div class="header">
   <h1>HAM-IV Rotator</h1>
-  <span class="ver">v3.2</span>
+  <span class="ver">v3.3</span>
 </div>
 
 <div class="status-bar">
@@ -452,11 +459,30 @@ body{font-family:'Segoe UI',sans-serif;background:#0a0a0a;color:#fff;min-height:
 
   <hr class="divider">
 
+  <!-- SMOOTHING & RELAY COMP -->
+  <div class="section">
+    <h3>Smoothing & Compensazione Relè</h3>
+    <div class="form-group">
+      <label>Smoothing Factor: <strong id="smoothVal">0.15</strong> (0.01=liscio, 1.0=disattivato)</label>
+      <input type="range" id="sliderSmooth" min="1" max="100" value="15" oninput="updateSmooth(this.value)">
+    </div>
+    <div class="form-group">
+      <label>Compensazione Relè: <strong id="relayCompVal">17</strong>° (0-30°)</label>
+      <input type="range" id="sliderRelayComp" min="0" max="30" value="17" oninput="updateRelayComp(this.value)">
+    </div>
+    <div class="form-group">
+      <label>Brake Delay: <strong id="brakeDelayVal">500</strong> ms (100-3000)</label>
+      <input type="range" id="sliderBrakeDelay" min="100" max="3000" step="50" value="500" oninput="updateBrakeDelay(this.value)">
+    </div>
+  </div>
+
+  <hr class="divider">
+
   <!-- INFO -->
   <div class="section">
     <h3>Info Sistema</h3>
     <div class="info-box" id="sysInfo">
-      Firmware: <strong>v3.2</strong><br>
+      Firmware: <strong>v3.3</strong><br>
       Hardware: <strong>ESP32-C3 + 4 Relè</strong><br>
       Range: <strong>0-450 con overlap</strong>
     </div>
@@ -566,10 +592,10 @@ function updateUI(d) {
   // Azimuth display
   var aziEl = document.getElementById('aziDisplay');
   var equivEl = document.getElementById('aziEquiv');
-  aziEl.textContent = d.displayAzi.toFixed(1);
+  aziEl.textContent = Math.round(d.displayAzi);
   if (d.overlap) {
     aziEl.className = 'azimuth overlap';
-    equivEl.textContent = '= ' + d.compassAzi.toFixed(1) + ' bussola';
+    equivEl.textContent = '= ' + Math.round(d.compassAzi) + '\u00b0 bussola';
   } else {
     aziEl.className = 'azimuth';
     equivEl.textContent = '';
@@ -763,6 +789,19 @@ function loadConfig() {
     document.getElementById('inputApChannel').value = d.apCh || 6;
     document.getElementById('inputOffsetPct').value = d.offsetPct || 0;
     document.getElementById('inputOffsetDeg').value = d.offsetDeg || 0;
+    if (d.smooth !== undefined) {
+      var sv = Math.round(d.smooth * 100);
+      document.getElementById('sliderSmooth').value = sv;
+      document.getElementById('smoothVal').textContent = d.smooth.toFixed(2);
+    }
+    if (d.relayComp !== undefined) {
+      document.getElementById('sliderRelayComp').value = Math.round(d.relayComp);
+      document.getElementById('relayCompVal').textContent = Math.round(d.relayComp);
+    }
+    if (d.brakeDelay !== undefined) {
+      document.getElementById('sliderBrakeDelay').value = d.brakeDelay;
+      document.getElementById('brakeDelayVal').textContent = d.brakeDelay;
+    }
   }).catch(function(e){});
 }
 
@@ -834,6 +873,22 @@ function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+function updateSmooth(v) {
+  var sf = (v / 100.0).toFixed(2);
+  document.getElementById('smoothVal').textContent = sf;
+  sendCmd('SMOOTH:' + sf);
+}
+
+function updateRelayComp(v) {
+  document.getElementById('relayCompVal').textContent = v;
+  sendCmd('RELAYCOMP:' + v);
+}
+
+function updateBrakeDelay(v) {
+  document.getElementById('brakeDelayVal').textContent = v;
+  sendCmd('DELAY:' + v);
+}
+
 function showMsg(id, txt) {
   var el = document.getElementById(id);
   el.textContent = txt;
@@ -855,7 +910,7 @@ void setup() {
 
   Serial.println();
   Serial.println(F("═══════════════════════════════════════"));
-  Serial.println(F("  HAM-IV ROTATOR CONTROLLER v3.2"));
+  Serial.println(F("  HAM-IV ROTATOR CONTROLLER v3.3"));
   Serial.println(F("  Overlap 0-450 + Offset"));
   Serial.println(F("═══════════════════════════════════════"));
 
@@ -927,6 +982,9 @@ void loadPreferences() {
   aziMaxADC    = preferences.getInt("aziMax", 2210);
   aziOffsetPct = preferences.getFloat("offPct", 0.0);
   aziOffsetDeg = preferences.getFloat("offDeg", 0.0);
+  smoothingFactor   = preferences.getFloat("smooth",    0.15);
+  relayCompensation = preferences.getFloat("relayComp", 17.0);
+  brakeDelayRuntime = preferences.getInt  ("brakeDelay",500);
   apSSID       = preferences.getString("apSSID", DEFAULT_AP_SSID);
   apPassword   = preferences.getString("apPass", DEFAULT_AP_PASSWORD);
   apChannel    = preferences.getInt("apCh", DEFAULT_AP_CHANNEL);
@@ -948,6 +1006,9 @@ void savePreferences() {
   preferences.putInt("aziMax", aziMaxADC);
   preferences.putFloat("offPct", aziOffsetPct);
   preferences.putFloat("offDeg", aziOffsetDeg);
+  preferences.putFloat("smooth",    smoothingFactor);
+  preferences.putFloat("relayComp", relayCompensation);
+  preferences.putInt  ("brakeDelay",brakeDelayRuntime);
   preferences.putString("apSSID", apSSID);
   preferences.putString("apPass", apPassword);
   preferences.putInt("apCh", apChannel);
@@ -1026,6 +1087,7 @@ void setupWebServer() {
   webServer.on("/", handleRoot);
   webServer.on("/status", handleStatus);
   webServer.on("/cmd", handleCommand);
+  webServer.on("/command", handleCommandAlt);
   webServer.on("/getconfig", handleGetConfig);
   webServer.on("/saveconfig", handleSaveConfig);
   webServer.on("/scan", handleScanNetworks);
@@ -1057,6 +1119,10 @@ void handleStatus() {
   json += ",\"staSsid\":\"" + staSSID + "\"";
   json += ",\"offsetPct\":" + String(aziOffsetPct, 1);
   json += ",\"offsetDeg\":" + String(aziOffsetDeg, 1);
+  json += ",\"smooth\":" + String(smoothingFactor, 2);
+  json += ",\"relayComp\":" + String(relayCompensation, 1);
+  json += ",\"rawAzi\":" + String(rawAzimuth, 1);
+  json += ",\"brakeDelay\":" + String(brakeDelayRuntime);
   json += "}";
   webServer.send(200, "application/json", json);
 }
@@ -1071,6 +1137,17 @@ void handleCommand() {
   webServer.send(200, "application/json", "{\"ok\":true}");
 }
 
+// Endpoint alternativo /command?cmd=... (usato da Processing via HTTP)
+void handleCommandAlt() {
+  if (!webServer.hasArg("cmd")) {
+    webServer.send(400, "application/json", "{\"ok\":false}");
+    return;
+  }
+  String cmd = webServer.arg("cmd");
+  processCommand(cmd);
+  webServer.send(200, "application/json", "{\"ok\":true}");
+}
+
 void handleGetConfig() {
   String json = "{";
   json += "\"apSsid\":\"" + apSSID + "\"";
@@ -1080,6 +1157,9 @@ void handleGetConfig() {
   json += ",\"offsetDeg\":" + String(aziOffsetDeg, 1);
   json += ",\"aziMin\":" + String(aziMinADC);
   json += ",\"aziMax\":" + String(aziMaxADC);
+  json += ",\"smooth\":" + String(smoothingFactor, 2);
+  json += ",\"relayComp\":" + String(relayCompensation, 1);
+  json += ",\"brakeDelay\":" + String(brakeDelayRuntime);
   json += "}";
   webServer.send(200, "application/json", json);
 }
@@ -1216,6 +1296,24 @@ void processCommand(String cmd) {
   else if (cmd.startsWith("BRAKE:")) {
     requestBrake(cmd.substring(6) == "1");
   }
+  else if (cmd.startsWith("SMOOTH:")) {
+    float sf = cmd.substring(7).toFloat();
+    smoothingFactor = constrain(sf, 0.01f, 1.0f);
+    savePreferences();
+    Serial.print(F("SmoothFactor: ")); Serial.println(smoothingFactor, 2);
+  }
+  else if (cmd.startsWith("RELAYCOMP:")) {
+    float rc = cmd.substring(10).toFloat();
+    relayCompensation = constrain(rc, 0.0f, 30.0f);
+    savePreferences();
+    Serial.print(F("RelayComp: ")); Serial.println(relayCompensation, 1);
+  }
+  else if (cmd.startsWith("DELAY:")) {
+    int d = cmd.substring(6).toInt();
+    brakeDelayRuntime = constrain(d, 100, 3000);
+    savePreferences();
+    Serial.print(F("BrakeDelay: ")); Serial.println(brakeDelayRuntime);
+  }
   else {
     Serial.print(F("Comando sconosciuto: ")); Serial.println(cmd);
   }
@@ -1313,8 +1411,15 @@ void updateAzimuth() {
   if (rawAzimuth < 0) rawAzimuth = 0;
   if (rawAzimuth > 450) rawAzimuth = 450;
 
-  // Filtro esponenziale per smoothing
-  filteredAzimuth = filteredAzimuth * 0.85 + rawAzimuth * 0.15;
+  // Filtro esponenziale (EMA) con compensazione relè
+  float compensated = rawAzimuth;
+  if (rotatingCW || rotatingCCW) {
+    // Quando il relè è attivo l'ADC scende: aggiungiamo compensazione
+    compensated += relayCompensation;
+    if (compensated < 0.0)   compensated = 0.0;
+    if (compensated > 450.0) compensated = 450.0;
+  }
+  filteredAzimuth = smoothingFactor * compensated + (1.0 - smoothingFactor) * filteredAzimuth;
   displayAzimuth = filteredAzimuth;
 
   // Calcola azimuth bussola (0-360) e stato overlap
@@ -1393,7 +1498,7 @@ void requestStartCW() {
   // Auto-release brake
   if (!brakeReleased) {
     requestBrake(true);
-    delay(BRAKE_DELAY_MS);
+    delay(brakeDelayRuntime);
   }
 
   brakeEngagePending = false;
@@ -1418,7 +1523,7 @@ void requestStartCCW() {
   // Auto-release brake
   if (!brakeReleased) {
     requestBrake(true);
-    delay(BRAKE_DELAY_MS);
+    delay(brakeDelayRuntime);
   }
 
   brakeEngagePending = false;
@@ -1617,21 +1722,24 @@ void saveCalibration() {
 
 void sendDiagnostics() {
   Serial.println(F("═══════════════════════════════════════"));
-  Serial.println(F("  STATO SISTEMA v3.2"));
+  Serial.println(F("  STATO SISTEMA v3.3"));
   Serial.println(F("═══════════════════════════════════════"));
   Serial.print(F("Power: "));    Serial.println(rotatorPowerOn ? "ON" : "OFF");
   Serial.print(F("Brake: "));    Serial.println(brakeReleased ? "RELEASED" : "ENGAGED");
   Serial.print(F("Motor CW: ")); Serial.println(rotatingCW ? "ON" : "OFF");
   Serial.print(F("Motor CCW: "));Serial.println(rotatingCCW ? "ON" : "OFF");
-  Serial.print(F("Azimuth: "));  Serial.print(displayAzimuth, 1); Serial.println(" deg");
-  Serial.print(F("Compass: "));  Serial.print(compassAzimuth, 1); Serial.println(" deg");
+  Serial.print(F("Azimuth: "));  Serial.print((int)displayAzimuth); Serial.println(" deg");
+  Serial.print(F("Compass: "));  Serial.print((int)compassAzimuth); Serial.println(" deg");
   Serial.print(F("Overlap: "));  Serial.println(overlapActive ? "YES" : "NO");
   Serial.print(F("GoTo: "));     Serial.println(goToActive ? "ACTIVE" : "OFF");
-  Serial.print(F("Target: "));   Serial.println(targetAzimuth, 1);
+  Serial.print(F("Target: "));   Serial.println((int)targetAzimuth);
   Serial.print(F("ADC raw: "));  Serial.println(lastStableADC);
   Serial.print(F("ADC range: "));Serial.print(aziMinADC); Serial.print(F("-")); Serial.println(aziMaxADC);
   Serial.print(F("Offset %: ")); Serial.println(aziOffsetPct, 1);
   Serial.print(F("Offset deg: "));Serial.println(aziOffsetDeg, 1);
+  Serial.print(F("SmoothFactor: "));Serial.println(smoothingFactor, 2);
+  Serial.print(F("RelayComp: ")); Serial.println(relayCompensation, 1);
+  Serial.print(F("BrakeDelay: "));Serial.println(brakeDelayRuntime);
   Serial.print(F("AP SSID: "));  Serial.println(apSSID);
   Serial.print(F("AP IP: "));    Serial.println(WiFi.softAPIP());
   Serial.print(F("STA SSID: ")); Serial.println(staSSID.length() > 0 ? staSSID : "(none)");
