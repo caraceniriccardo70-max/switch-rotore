@@ -1,0 +1,1643 @@
+// ═══════════════════════════════════════════════════════════════════════════
+//  ESP32-C3 HAM-IV ROTATOR CONTROLLER v3.2
+//  Dual WiFi: Access Point + Connessione a Router
+//  + Web Interface + USB Seriale + OVERLAP 0°-450°
+//  + Offset % e gradi
+// ═══════════════════════════════════════════════════════════════════════════
+//
+//  MODALITÀ WIFI DOPPIA:
+//    1. Crea SEMPRE la rete propria (Access Point)
+//       Default: SSID "HAM-IV-Rotator" / Password "hamradio73"
+//       Connettiti → http://192.168.4.1
+//
+//    2. SI CONNETTE ANCHE al tuo router WiFi di casa
+//       Configura SSID/password del router dalla pagina impostazioni
+//       Accedi dall'IP assegnato dal router (mostrato nella pagina)
+//
+//    → Puoi controllare il rotore da ENTRAMBI gli indirizzi!
+//
+//  HARDWARE:
+//    Relè 1 → Pin 3  → POWER       Btn 1 → Pin 10 → POWER
+//    Relè 2 → Pin 4  → BRAKE       Btn 2 → Pin 9  → BRAKE
+//    Relè 3 → Pin 5  → CW          Btn 3 → Pin 8  → CW
+//    Relè 4 → Pin 7  → CCW         Btn 4 → Pin 6  → CCW
+//    LED    → Pin 2                 ADC   → Pin 0  → Azimuth
+//
+//  OVERLAP:
+//    Il Yaesu G-450C ruota da 0° a 450°.
+//    Zona 360°-450° = overlap (il rotore ha superato il Nord).
+//    La bussola mostra la posizione equivalente 0°-90° con indicatore rosso.
+//
+//  OFFSET:
+//    Offset % → sposta il punto di lettura ADC (calibrazione fine)
+//    Offset ° → aggiunge/sottrae gradi fissi al risultato finale
+//
+// ═══════════════════════════════════════════════════════════════════════════
+
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Preferences.h>
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  FORWARD DECLARATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+void loadPreferences();
+void savePreferences();
+void setupWiFi();
+void connectToRouter();
+void checkWiFiReconnect();
+void setupWebServer();
+void handleRoot();
+void handleStatus();
+void handleCommand();
+void handleGetConfig();
+void handleSaveConfig();
+void handleScanNetworks();
+void readSerialCommands();
+void readButtons();
+void updateAzimuth();
+int  getMedian(int* arr, int size);
+void handleBrakeSequence();
+void handleGoTo();
+void checkSafetyTimeout();
+void updateStatusLED();
+void setRotatorPower(bool on);
+void requestBrake(bool release);
+void requestStartCW();
+void requestStartCCW();
+void requestStopMotor();
+void emergencyHalt();
+void startGoTo(float target);
+void processCommand(String cmd);
+void startCalibration();
+void saveCalibration();
+void sendDiagnostics();
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  PIN HARDWARE
+// ═══════════════════════════════════════════════════════════════════════════
+
+#define RELAY_POWER     3
+#define RELAY_BRAKE     4
+#define RELAY_CW        5
+#define RELAY_CCW       7
+#define LED_STATUS      2
+#define BTN_POWER      10
+#define BTN_BRAKE       9
+#define BTN_CW          8
+#define BTN_CCW         6
+#define AZI_PIN         0
+
+#define RELAY_ON    HIGH
+#define RELAY_OFF   LOW
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CONFIGURAZIONE DEFAULT
+// ═══════════════════════════════════════════════════════════════════════════
+
+#define DEFAULT_AP_SSID     "HAM-IV-Rotator"
+#define DEFAULT_AP_PASSWORD "hamradio73"
+#define DEFAULT_AP_CHANNEL  6
+
+#define DEFAULT_STA_SSID     ""
+#define DEFAULT_STA_PASSWORD ""
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  TIMING
+// ═══════════════════════════════════════════════════════════════════════════
+
+#define BRAKE_DELAY_MS       500
+#define MOTOR_STOP_DELAY_MS  500
+#define DIRECTION_CHANGE_MS  300
+#define GOTO_TOLERANCE       3.0
+#define GOTO_TIMEOUT_MS      90000
+#define SAFETY_TIMEOUT_MS    120000
+#define AZI_READ_INTERVAL    25
+#define DEBOUNCE_MS          300
+#define WIFI_RECONNECT_MS    30000
+#define WIFI_CONNECT_TIMEOUT 15000
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  FILTRO ADC
+// ═══════════════════════════════════════════════════════════════════════════
+
+#define ADC_BUFFER_SIZE  16
+#define ADC_MEDIAN_SIZE   5
+
+int adcBuffer[ADC_BUFFER_SIZE];
+int adcBufferIdx = 0;
+bool adcBufferFull = false;
+int medianBuffer[ADC_MEDIAN_SIZE];
+int medianBufferIdx = 0;
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  VARIABILI STATO
+// ═══════════════════════════════════════════════════════════════════════════
+
+bool rotatorPowerOn  = false;
+bool brakeReleased   = false;
+bool rotatingCW      = false;
+bool rotatingCCW     = false;
+
+bool brakeEngagePending = false;
+unsigned long brakeEngageStart = 0;
+
+bool goToActive         = false;
+float targetAzimuth     = -1;
+unsigned long goToStart = 0;
+
+float rawAzimuth        = 0.0;
+float filteredAzimuth   = 0.0;
+float displayAzimuth    = 0.0;   // 0-450 gradi reali
+float compassAzimuth    = 0.0;   // 0-360 per la bussola
+bool  overlapActive     = false;  // true se >360°
+int   lastStableADC     = 0;
+
+unsigned long rotationStart = 0;
+
+unsigned long lastBtnPower = 0;
+unsigned long lastBtnBrake = 0;
+bool prevBtnCW  = false;
+bool prevBtnCCW = false;
+
+unsigned long lastAziRead  = 0;
+unsigned long lastLedBlink = 0;
+bool ledState = false;
+
+int   aziMinADC     = 20;
+int   aziMaxADC     = 2210;
+float aziOffset     = 0.0;
+float aziOffsetPct  = 0.0;   // offset in percentuale del range ADC
+float aziOffsetDeg  = 0.0;   // offset in gradi fissi
+bool  calibrating   = false;
+int   calMinADC     = 4095;
+int   calMaxADC     = 0;
+
+// WiFi AP
+String apSSID     = DEFAULT_AP_SSID;
+String apPassword = DEFAULT_AP_PASSWORD;
+int    apChannel  = DEFAULT_AP_CHANNEL;
+
+// WiFi STA
+String staSSID     = DEFAULT_STA_SSID;
+String staPassword = DEFAULT_STA_PASSWORD;
+bool   staEnabled  = false;
+bool   staConnected = false;
+String staIP       = "";
+unsigned long lastReconnectAttempt = 0;
+int    reconnectCount = 0;
+
+// *** FIX: variabile mancante che causava errore di compilazione ***
+String serialBuffer = "";
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  OGGETTI GLOBALI
+// ═══════════════════════════════════════════════════════════════════════════
+
+WebServer webServer(80);
+Preferences preferences;
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  PAGINA WEB — HTML/CSS/JS  (v3.2 con OVERLAP + OFFSET + LUCINA)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const char INDEX_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>HAM-IV Rotator</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',sans-serif;background:#0a0a0a;color:#fff;min-height:100vh;overflow-x:hidden;padding-bottom:70px}
+.header{background:#111;padding:12px 20px;border-bottom:2px solid #00ff88;display:flex;justify-content:space-between;align-items:center}
+.header h1{color:#00ff88;font-size:18px}
+.header .ver{color:#666;font-size:11px}
+.status-bar{display:flex;gap:12px;padding:8px 15px;background:#0d0d0d;border-bottom:1px solid #333;flex-wrap:wrap}
+.status-item{display:flex;align-items:center;gap:5px;font-size:11px}
+.led{width:10px;height:10px;border-radius:50%;display:inline-block}
+.led-on{background:#00ff88;box-shadow:0 0 8px #00ff88}
+.led-off{background:#333;box-shadow:none}
+.led-warn{background:#ffaa00;box-shadow:0 0 8px #ffaa00}
+.led-blue{background:#00aaff;box-shadow:0 0 8px #00aaff}
+.led-red{background:#ff4444;box-shadow:0 0 8px #ff4444}
+.led-blink{animation:ledblink 0.5s infinite alternate}
+@keyframes ledblink{from{opacity:1}to{opacity:0.2}}
+.container{padding:15px;max-width:500px;margin:0 auto}
+.compass-wrap{display:flex;justify-content:center;margin:15px 0}
+.compass{position:relative;width:260px;height:260px}
+.compass canvas{width:100%;height:100%}
+.compass .center-display{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;background:rgba(17,17,17,0.9);border:2px solid #00aaff;border-radius:50%;width:90px;height:90px;display:flex;flex-direction:column;justify-content:center;align-items:center}
+.compass .azimuth{font-size:20px;font-weight:bold;color:#00ff88}
+.compass .azimuth.overlap{color:#ff6600}
+.compass .azi-equiv{font-size:9px;color:#ff6600;margin-top:-2px}
+.compass .dir-label{font-size:11px;color:#888}
+.btn-row{display:flex;gap:10px;justify-content:center;margin:12px 0}
+.btn{padding:14px 22px;border:2px solid #444;border-radius:10px;background:#1a1a1a;color:#fff;font-size:14px;font-weight:bold;cursor:pointer;transition:all .15s;touch-action:manipulation;user-select:none;min-width:80px;text-align:center}
+.btn:active{transform:scale(.95)}
+.btn-power{border-color:#00aaff;color:#00aaff}
+.btn-power.on{background:#00aaff;color:#000;box-shadow:0 0 15px rgba(0,170,255,.4)}
+.btn-cw{border-color:#00ff00;color:#00ff00}
+.btn-cw.on{background:#00ff00;color:#000;box-shadow:0 0 15px rgba(0,255,0,.4)}
+.btn-ccw{border-color:#ff8800;color:#ff8800}
+.btn-ccw.on{background:#ff8800;color:#000;box-shadow:0 0 15px rgba(255,136,0,.4)}
+.btn-halt{border-color:#ff3030;background:#ff3030;color:#fff}
+.btn-halt:active{background:#ff0000}
+.btn-brake{border-color:#ffaa00;color:#ffaa00}
+.btn-brake.on{background:#ffaa00;color:#000}
+.section{background:#111;border:1px solid #333;border-radius:10px;padding:15px;margin:12px 0}
+.section h3{color:#00ff88;font-size:14px;margin-bottom:10px}
+.goto-row{display:flex;gap:10px;align-items:center}
+.goto-input{flex:1;padding:10px;background:#1a1a1a;border:1px solid #444;border-radius:6px;color:#fff;font-size:16px;text-align:center}
+.goto-btn{padding:10px 20px;background:#00ff88;border:none;border-radius:6px;color:#000;font-weight:bold;font-size:14px;cursor:pointer}
+.preset-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:10px}
+.preset-btn{padding:8px;background:#1e1e1e;border:1px solid #444;border-radius:6px;color:#fff;font-size:12px;cursor:pointer;text-align:center}
+.preset-btn:active{background:#00ff88;color:#000}
+.preset-btn.ovl-preset{border-color:#ff6600;color:#ff6600}
+.preset-btn.ovl-preset:active{background:#ff6600;color:#000}
+.ovl-banner{display:none;background:#331100;border:1px solid #ff6600;border-radius:8px;padding:8px 12px;margin:8px 0;text-align:center;font-size:12px;color:#ff6600;font-weight:bold}
+.ovl-banner.visible{display:block}
+.nav{position:fixed;bottom:0;left:0;right:0;background:#111;border-top:1px solid #333;display:flex;justify-content:center;gap:10px;padding:10px}
+.nav-btn{padding:10px 20px;background:#1a1a1a;border:1px solid #444;border-radius:8px;color:#fff;font-size:12px;font-weight:bold;cursor:pointer}
+.nav-btn.active{background:#00ff88;color:#000;border-color:#00ff88}
+.settings-page{display:none}
+.settings-page.visible{display:block}
+.control-page.hidden{display:none}
+.form-group{margin:12px 0}
+.form-group label{display:block;color:#888;font-size:12px;margin-bottom:4px}
+.form-group input{width:100%;padding:10px;background:#1a1a1a;border:1px solid #444;border-radius:6px;color:#fff;font-size:14px}
+.save-btn{width:100%;padding:12px;background:#00ff88;border:none;border-radius:8px;color:#000;font-weight:bold;font-size:14px;cursor:pointer;margin-top:15px}
+.save-btn.orange{background:#ffaa00}
+.save-btn.cyan{background:#00aaff}
+.info-box{background:#0d0d0d;border:1px solid #333;border-radius:8px;padding:12px;margin:10px 0;font-size:12px;color:#888;line-height:1.8}
+.info-box strong{color:#fff}
+.info-box .ok{color:#00ff88}
+.info-box .err{color:#ff4444}
+.info-box .blue{color:#00aaff}
+.info-box .orange{color:#ff6600}
+.msg{padding:10px;border-radius:6px;margin:10px 0;font-size:13px;display:none}
+.msg-ok{background:#0a3020;border:1px solid #00ff88;color:#00ff88}
+.msg-err{background:#300a0a;border:1px solid #ff4444;color:#ff4444}
+.divider{border:none;border-top:1px solid #333;margin:15px 0}
+.scan-list{max-height:150px;overflow-y:auto;margin:8px 0}
+.scan-item{padding:8px 10px;background:#1a1a1a;border:1px solid #333;border-radius:4px;margin:4px 0;cursor:pointer;font-size:12px;display:flex;justify-content:space-between}
+.scan-item:hover{border-color:#00ff88;background:#1e2e1e}
+.scan-item .rssi{color:#888}
+.offset-row{display:flex;gap:10px;margin:8px 0}
+.offset-row .form-group{flex:1;margin:0}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>HAM-IV Rotator</h1>
+  <span class="ver">v3.2</span>
+</div>
+
+<div class="status-bar">
+  <div class="status-item"><span class="led led-off" id="ledPwr"></span><span id="txtPwr">PWR:OFF</span></div>
+  <div class="status-item"><span class="led led-off" id="ledBrk"></span><span id="txtBrk">BRK:ON</span></div>
+  <div class="status-item"><span class="led led-off" id="ledMot"></span><span id="txtMot">STOP</span></div>
+  <div class="status-item"><span class="led led-off" id="ledOvl"></span><span id="txtOvl">OVL</span></div>
+  <div class="status-item"><span class="led led-off" id="ledAP"></span><span>AP</span></div>
+  <div class="status-item"><span class="led led-off" id="ledSTA"></span><span id="txtSTA">Router</span></div>
+</div>
+
+<!-- PAGINA CONTROLLO -->
+<div class="container control-page" id="controlPage">
+
+  <div class="ovl-banner" id="ovlBanner">&#9888; ZONA OVERLAP — Il rotore ha superato 360°</div>
+
+  <div class="compass-wrap">
+    <div class="compass">
+      <canvas id="compassCanvas" width="260" height="260"></canvas>
+      <div class="center-display">
+        <div class="azimuth" id="aziDisplay">0.0</div>
+        <div class="azi-equiv" id="aziEquiv"></div>
+        <div class="dir-label" id="dirLabel">STOP</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="btn-row">
+    <div class="btn btn-power" id="btnPower" onclick="sendCmd('PWR_TOGGLE')">POWER</div>
+    <div class="btn btn-brake" id="btnBrake" onclick="sendCmd('BRAKE_TOGGLE')">BRAKE</div>
+  </div>
+
+  <div class="btn-row">
+    <div class="btn btn-ccw" id="btnCCW"
+         ontouchstart="sendCmd('CCW:1');event.preventDefault();"
+         ontouchend="sendCmd('CCW:0');event.preventDefault();"
+         onmousedown="sendCmd('CCW:1')" onmouseup="sendCmd('CCW:0')" onmouseleave="sendCmd('CCW:0')">CCW</div>
+    <div class="btn btn-halt" onclick="sendCmd('HALT:1')">HALT</div>
+    <div class="btn btn-cw" id="btnCW"
+         ontouchstart="sendCmd('CW:1');event.preventDefault();"
+         ontouchend="sendCmd('CW:0');event.preventDefault();"
+         onmousedown="sendCmd('CW:1')" onmouseup="sendCmd('CW:0')" onmouseleave="sendCmd('CW:0')">CW</div>
+  </div>
+
+  <div class="section">
+    <h3>VAI A POSIZIONE (0-450)</h3>
+    <div class="goto-row">
+      <input type="number" class="goto-input" id="gotoInput" min="0" max="450" step="1" placeholder="0-450">
+      <button class="goto-btn" onclick="sendGoto()">GO</button>
+    </div>
+    <div class="preset-grid">
+      <div class="preset-btn" onclick="goPreset(0)">N 0</div>
+      <div class="preset-btn" onclick="goPreset(45)">NE 45</div>
+      <div class="preset-btn" onclick="goPreset(90)">E 90</div>
+      <div class="preset-btn" onclick="goPreset(135)">SE 135</div>
+      <div class="preset-btn" onclick="goPreset(180)">S 180</div>
+      <div class="preset-btn" onclick="goPreset(225)">SW 225</div>
+      <div class="preset-btn" onclick="goPreset(270)">W 270</div>
+      <div class="preset-btn" onclick="goPreset(315)">NW 315</div>
+      <div class="preset-btn" onclick="goPreset(360)">N 360</div>
+      <div class="preset-btn ovl-preset" onclick="goPreset(375)">N+15 375</div>
+      <div class="preset-btn ovl-preset" onclick="goPreset(405)">NE+ 405</div>
+      <div class="preset-btn ovl-preset" onclick="goPreset(450)">E+ 450</div>
+    </div>
+  </div>
+</div>
+
+<!-- PAGINA IMPOSTAZIONI -->
+<div class="container settings-page" id="settingsPage">
+  <h2 style="color:#00ff88;margin:15px 0;">Impostazioni</h2>
+
+  <!-- ROUTER WiFi -->
+  <div class="section">
+    <h3>CONNESSIONE AL ROUTER</h3>
+    <div id="staStatus" class="info-box">Caricamento...</div>
+    <div class="form-group">
+      <label>SSID del router:</label>
+      <input type="text" id="inputStaSSID" maxlength="32" placeholder="Nome rete WiFi di casa">
+    </div>
+    <div class="form-group">
+      <label>Password router:</label>
+      <input type="password" id="inputStaPass" maxlength="63" placeholder="Password WiFi">
+    </div>
+    <button class="save-btn" onclick="saveStaSettings()">CONNETTI AL ROUTER</button>
+    <button class="btn" style="border-color:#ffaa00;color:#ffaa00;width:100%;margin-top:8px;" onclick="scanNetworks()">CERCA RETI WiFi</button>
+    <div id="scanResults" class="scan-list"></div>
+    <button class="btn" style="border-color:#ff4444;color:#ff4444;width:100%;margin-top:8px;" onclick="disconnectSta()">DISCONNETTI DAL ROUTER</button>
+    <div class="msg msg-ok" id="msgStaOk">Connessione in corso...</div>
+    <div class="msg msg-err" id="msgStaErr">Errore</div>
+  </div>
+
+  <hr class="divider">
+
+  <!-- ACCESS POINT -->
+  <div class="section">
+    <h3>ACCESS POINT (rete propria)</h3>
+    <div class="info-box">
+      IP Access Point: <strong class="blue">192.168.4.1</strong><br>
+      Connettiti a questa rete per controllo diretto
+    </div>
+    <div class="form-group">
+      <label>Nome rete AP (SSID):</label>
+      <input type="text" id="inputApSSID" maxlength="32">
+    </div>
+    <div class="form-group">
+      <label>Password AP (min 8 caratteri):</label>
+      <input type="password" id="inputApPass" maxlength="63" minlength="8">
+    </div>
+    <div class="form-group">
+      <label>Canale WiFi AP (1-13):</label>
+      <input type="number" id="inputApChannel" min="1" max="13" value="6">
+    </div>
+    <button class="save-btn orange" onclick="saveApSettings()">SALVA AP E RIAVVIA</button>
+    <div class="msg msg-ok" id="msgApOk">Salvato! Riavvio...</div>
+    <div class="msg msg-err" id="msgApErr">Errore: password min 8 caratteri</div>
+  </div>
+
+  <hr class="divider">
+
+  <!-- CALIBRAZIONE -->
+  <div class="section">
+    <h3>Calibrazione Azimuth</h3>
+    <div class="info-box">
+      ADC Min: <strong id="calMin">--</strong> |
+      ADC Max: <strong id="calMax">--</strong> |
+      ADC Ora: <strong id="calCur">--</strong><br>
+      Range: <strong>0 - 450</strong> (con overlap)
+    </div>
+    <div class="btn-row">
+      <button class="btn" style="border-color:#ffaa00;color:#ffaa00;" onclick="sendCmd('CAL:START')">AVVIA CAL</button>
+      <button class="btn" style="border-color:#00ff88;color:#00ff88;" onclick="sendCmd('CAL:SAVE')">SALVA CAL</button>
+    </div>
+  </div>
+
+  <hr class="divider">
+
+  <!-- OFFSET -->
+  <div class="section">
+    <h3>Offset Calibrazione Fine</h3>
+    <div class="info-box">
+      Offset %: sposta il punto di lettura ADC<br>
+      Offset gradi: aggiunge/sottrae gradi al risultato
+    </div>
+    <div class="offset-row">
+      <div class="form-group">
+        <label>Offset % (-50 a +50):</label>
+        <input type="number" id="inputOffsetPct" min="-50" max="50" step="0.5" value="0">
+      </div>
+      <div class="form-group">
+        <label>Offset gradi (-45 a +45):</label>
+        <input type="number" id="inputOffsetDeg" min="-45" max="45" step="0.5" value="0">
+      </div>
+    </div>
+    <button class="save-btn cyan" onclick="saveOffsets()">SALVA OFFSET</button>
+  </div>
+
+  <hr class="divider">
+
+  <!-- INFO -->
+  <div class="section">
+    <h3>Info Sistema</h3>
+    <div class="info-box" id="sysInfo">
+      Firmware: <strong>v3.2</strong><br>
+      Hardware: <strong>ESP32-C3 + 4 Relè</strong><br>
+      Range: <strong>0-450 con overlap</strong>
+    </div>
+  </div>
+</div>
+
+<!-- NAVIGAZIONE -->
+<div class="nav">
+  <div class="nav-btn active" id="navCtrl" onclick="showPage('control')">Controllo</div>
+  <div class="nav-btn" id="navSettings" onclick="showPage('settings')">Impostazioni</div>
+</div>
+
+<script>
+// ═══ STATO GLOBALE JS ═══
+var state = {};
+var canvas, ctx;
+var pollTimer = null;
+
+// ═══ INIT ═══
+window.onload = function() {
+  canvas = document.getElementById('compassCanvas');
+  ctx = canvas.getContext('2d');
+  drawCompass(0, false, -1);
+  loadConfig();
+  pollStatus();
+  pollTimer = setInterval(pollStatus, 500);
+};
+
+// ═══ NAVIGAZIONE PAGINE ═══
+function showPage(p) {
+  var cp = document.getElementById('controlPage');
+  var sp = document.getElementById('settingsPage');
+  var nc = document.getElementById('navCtrl');
+  var ns = document.getElementById('navSettings');
+  if (p === 'control') {
+    cp.classList.remove('hidden');
+    sp.classList.remove('visible');
+    nc.classList.add('active');
+    ns.classList.remove('active');
+  } else {
+    cp.classList.add('hidden');
+    sp.classList.add('visible');
+    nc.classList.remove('active');
+    ns.classList.add('active');
+    loadConfig();
+  }
+}
+
+// ═══ POLLING STATO ═══
+function pollStatus() {
+  fetch('/status').then(function(r){return r.json();}).then(function(d) {
+    state = d;
+    updateUI(d);
+  }).catch(function(e){});
+}
+
+function updateUI(d) {
+  // LED Power
+  var lp = document.getElementById('ledPwr');
+  lp.className = 'led ' + (d.power ? 'led-on' : 'led-off');
+  document.getElementById('txtPwr').textContent = 'PWR:' + (d.power ? 'ON' : 'OFF');
+
+  // LED Brake
+  var lb = document.getElementById('ledBrk');
+  lb.className = 'led ' + (d.brake ? 'led-warn' : 'led-off');
+  document.getElementById('txtBrk').textContent = d.brake ? 'BRK:FREE' : 'BRK:ON';
+
+  // LED Motore
+  var lm = document.getElementById('ledMot');
+  if (d.cw) {
+    lm.className = 'led led-on';
+    document.getElementById('txtMot').textContent = 'CW';
+  } else if (d.ccw) {
+    lm.className = 'led led-on';
+    document.getElementById('txtMot').textContent = 'CCW';
+  } else {
+    lm.className = 'led led-off';
+    document.getElementById('txtMot').textContent = 'STOP';
+  }
+
+  // LED Overlap
+  var lo = document.getElementById('ledOvl');
+  var ovlBanner = document.getElementById('ovlBanner');
+  if (d.overlap) {
+    lo.className = 'led led-red led-blink';
+    document.getElementById('txtOvl').textContent = 'OVL!';
+    ovlBanner.classList.add('visible');
+  } else {
+    lo.className = 'led led-off';
+    document.getElementById('txtOvl').textContent = 'OVL';
+    ovlBanner.classList.remove('visible');
+  }
+
+  // LED AP
+  document.getElementById('ledAP').className = 'led led-on';
+
+  // LED STA
+  var ls = document.getElementById('ledSTA');
+  if (d.staConn) {
+    ls.className = 'led led-blue';
+    document.getElementById('txtSTA').textContent = d.staIP;
+  } else {
+    ls.className = 'led led-off';
+    document.getElementById('txtSTA').textContent = 'Router';
+  }
+
+  // Azimuth display
+  var aziEl = document.getElementById('aziDisplay');
+  var equivEl = document.getElementById('aziEquiv');
+  aziEl.textContent = d.displayAzi.toFixed(1);
+  if (d.overlap) {
+    aziEl.className = 'azimuth overlap';
+    equivEl.textContent = '= ' + d.compassAzi.toFixed(1) + ' bussola';
+  } else {
+    aziEl.className = 'azimuth';
+    equivEl.textContent = '';
+  }
+
+  // Direction label
+  var dl = document.getElementById('dirLabel');
+  if (d.goTo) {
+    dl.textContent = 'GOTO ' + d.target.toFixed(0);
+  } else if (d.cw) {
+    dl.textContent = 'CW >>';
+  } else if (d.ccw) {
+    dl.textContent = '<< CCW';
+  } else {
+    dl.textContent = 'STOP';
+  }
+
+  // Button states
+  document.getElementById('btnPower').className = 'btn btn-power' + (d.power ? ' on' : '');
+  document.getElementById('btnBrake').className = 'btn btn-brake' + (d.brake ? ' on' : '');
+  document.getElementById('btnCW').className = 'btn btn-cw' + (d.cw ? ' on' : '');
+  document.getElementById('btnCCW').className = 'btn btn-ccw' + (d.ccw ? ' on' : '');
+
+  // Calibration info
+  document.getElementById('calMin').textContent = d.calMin;
+  document.getElementById('calMax').textContent = d.calMax;
+  document.getElementById('calCur').textContent = d.adcRaw;
+
+  // STA status in settings
+  var ss = document.getElementById('staStatus');
+  if (d.staConn) {
+    ss.innerHTML = '<span class="ok">Connesso a:</span> <strong>' + d.staSsid + '</strong><br>IP: <strong class="blue">' + d.staIP + '</strong>';
+  } else if (d.staSsid && d.staSsid.length > 0) {
+    ss.innerHTML = '<span class="err">Non connesso</span> — SSID: <strong>' + d.staSsid + '</strong>';
+  } else {
+    ss.innerHTML = 'Nessun router configurato';
+  }
+
+  // Draw compass
+  drawCompass(d.compassAzi, d.overlap, d.goTo ? d.target : -1);
+}
+
+// ═══ BUSSOLA CANVAS ═══
+function drawCompass(azi, overlap, targetAzi) {
+  if (!ctx) return;
+  var W = 260, H = 260, cx = W/2, cy = H/2, r = 110;
+  ctx.clearRect(0, 0, W, H);
+
+  // Cerchio esterno
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI*2);
+  ctx.strokeStyle = overlap ? '#ff6600' : '#00ff88';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Cerchi interni
+  for (var i = 1; i <= 3; i++) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, r*i/4, 0, Math.PI*2);
+    ctx.strokeStyle = 'rgba(68,68,68,0.4)';
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+  }
+
+  // Tacche e gradi
+  for (var deg = 0; deg < 360; deg += 10) {
+    var rad = (deg - 90) * Math.PI / 180;
+    var inner = (deg % 30 === 0) ? r - 15 : r - 8;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(rad)*inner, cy + Math.sin(rad)*inner);
+    ctx.lineTo(cx + Math.cos(rad)*r, cy + Math.sin(rad)*r);
+    ctx.strokeStyle = (deg % 90 === 0) ? '#fff' : '#555';
+    ctx.lineWidth = (deg % 90 === 0) ? 2 : 1;
+    ctx.stroke();
+
+    if (deg % 30 === 0) {
+      ctx.font = (deg % 90 === 0) ? 'bold 10px sans-serif' : '8px sans-serif';
+      ctx.fillStyle = (deg % 90 === 0) ? '#fff' : '#888';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(deg, cx + Math.cos(rad)*(r+14), cy + Math.sin(rad)*(r+14));
+    }
+  }
+
+  // Punti cardinali
+  var cards = ['N','E','S','W'];
+  for (var ci = 0; ci < 4; ci++) {
+    var crad = (ci*90 - 90) * Math.PI / 180;
+    ctx.font = 'bold 14px sans-serif';
+    ctx.fillStyle = '#00ff88';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+  }
+
+  // Zona overlap (arco rosso 0-90)
+  if (overlap) {
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, r-2, -90*Math.PI/180, 0);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(255,102,0,0.12)';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx, cy, r-2, -90*Math.PI/180, 0);
+    ctx.strokeStyle = 'rgba(255,102,0,0.5)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  // Target (linea tratteggiata)
+  if (targetAzi >= 0) {
+    var trad = (targetAzi > 360 ? targetAzi - 360 : targetAzi);
+    trad = (trad - 90) * Math.PI / 180;
+    ctx.setLineDash([6,4]);
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(trad)*(r-5), cy + Math.sin(trad)*(r-5));
+    ctx.strokeStyle = '#ffaa00';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Triangolino target
+    ctx.save();
+    ctx.translate(cx + Math.cos(trad)*(r-12), cy + Math.sin(trad)*(r-12));
+    ctx.rotate(trad + Math.PI/2);
+    ctx.beginPath();
+    ctx.moveTo(-5, -5);
+    ctx.lineTo(5, -5);
+    ctx.lineTo(0, 3);
+    ctx.closePath();
+    ctx.fillStyle = '#ffaa00';
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Ago della bussola
+  var needleRad = (azi - 90) * Math.PI / 180;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx + Math.cos(needleRad)*(r-20), cy + Math.sin(needleRad)*(r-20));
+  ctx.strokeStyle = overlap ? '#ff6600' : '#00ff88';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  // Punta dell'ago (triangolo)
+  ctx.save();
+  ctx.translate(cx + Math.cos(needleRad)*(r-20), cy + Math.sin(needleRad)*(r-20));
+  ctx.rotate(needleRad + Math.PI/2);
+  ctx.beginPath();
+  ctx.moveTo(-6, -8);
+  ctx.lineTo(6, -8);
+  ctx.lineTo(0, 2);
+  ctx.closePath();
+  ctx.fillStyle = overlap ? '#ff6600' : '#00ff88';
+  ctx.fill();
+  ctx.restore();
+
+  // Centro
+  ctx.beginPath();
+  ctx.arc(cx, cy, 5, 0, Math.PI*2);
+  ctx.fillStyle = overlap ? '#ff6600' : '#00ff88';
+  ctx.fill();
+}
+
+// ═══ COMANDI ═══
+function sendCmd(cmd) {
+  fetch('/cmd?c=' + encodeURIComponent(cmd)).then(function(r){return r.json();}).then(function(d){
+    if (d.ok) pollStatus();
+  }).catch(function(e){});
+}
+
+function sendGoto() {
+  var v = parseFloat(document.getElementById('gotoInput').value);
+  if (isNaN(v) || v < 0 || v > 450) { alert('Valore 0-450'); return; }
+  sendCmd('GOTO:' + v.toFixed(1));
+}
+
+function goPreset(deg) {
+  document.getElementById('gotoInput').value = deg;
+  sendCmd('GOTO:' + deg.toFixed(1));
+}
+
+// ═══ CONFIGURAZIONE ═══
+function loadConfig() {
+  fetch('/getconfig').then(function(r){return r.json();}).then(function(d) {
+    document.getElementById('inputStaSSID').value = d.staSsid || '';
+    document.getElementById('inputStaPass').value = '';
+    document.getElementById('inputApSSID').value = d.apSsid || '';
+    document.getElementById('inputApPass').value = '';
+    document.getElementById('inputApChannel').value = d.apCh || 6;
+    document.getElementById('inputOffsetPct').value = d.offsetPct || 0;
+    document.getElementById('inputOffsetDeg').value = d.offsetDeg || 0;
+  }).catch(function(e){});
+}
+
+function saveStaSettings() {
+  var ssid = document.getElementById('inputStaSSID').value.trim();
+  var pass = document.getElementById('inputStaPass').value;
+  if (ssid.length === 0) { showMsg('msgStaErr', 'Inserisci SSID'); return; }
+  showMsg('msgStaOk', 'Connessione in corso...');
+  fetch('/saveconfig?type=sta&ssid=' + encodeURIComponent(ssid) + '&pass=' + encodeURIComponent(pass))
+    .then(function(r){return r.json();}).then(function(d){
+      if (d.ok) showMsg('msgStaOk', 'Salvato! Connessione...');
+      else showMsg('msgStaErr', 'Errore');
+    }).catch(function(e){ showMsg('msgStaErr', 'Errore rete'); });
+}
+
+function disconnectSta() {
+  fetch('/saveconfig?type=sta&ssid=&pass=')
+    .then(function(r){return r.json();}).then(function(d){
+      showMsg('msgStaOk', 'Disconnesso');
+    }).catch(function(e){});
+}
+
+function saveApSettings() {
+  var ssid = document.getElementById('inputApSSID').value.trim();
+  var pass = document.getElementById('inputApPass').value;
+  var ch = parseInt(document.getElementById('inputApChannel').value);
+  if (ssid.length === 0) { showMsg('msgApErr', 'Inserisci SSID'); return; }
+  if (pass.length > 0 && pass.length < 8) { showMsg('msgApErr', 'Password min 8 caratteri'); return; }
+  showMsg('msgApOk', 'Salvato! Riavvio...');
+  fetch('/saveconfig?type=ap&ssid=' + encodeURIComponent(ssid) + '&pass=' + encodeURIComponent(pass) + '&ch=' + ch)
+    .then(function(r){return r.json();}).then(function(d){}).catch(function(e){});
+}
+
+function saveOffsets() {
+  var pct = parseFloat(document.getElementById('inputOffsetPct').value) || 0;
+  var deg = parseFloat(document.getElementById('inputOffsetDeg').value) || 0;
+  fetch('/saveconfig?type=offset&pct=' + pct + '&deg=' + deg)
+    .then(function(r){return r.json();}).then(function(d){
+      if (d.ok) alert('Offset salvati!');
+    }).catch(function(e){});
+}
+
+function scanNetworks() {
+  var sr = document.getElementById('scanResults');
+  sr.innerHTML = '<div style="color:#888;padding:8px">Scansione...</div>';
+  fetch('/scan').then(function(r){return r.json();}).then(function(d){
+    if (!d.nets || d.nets.length === 0) {
+      sr.innerHTML = '<div style="color:#888;padding:8px">Nessuna rete trovata</div>';
+      return;
+    }
+    var h = '';
+    for (var i = 0; i < d.nets.length; i++) {
+      h += '<div class="scan-item" onclick="pickNet(\'' + escHtml(d.nets[i].ssid) + '\')">';
+      h += '<span>' + escHtml(d.nets[i].ssid) + '</span>';
+      h += '<span class="rssi">' + d.nets[i].rssi + ' dBm</span></div>';
+    }
+    sr.innerHTML = h;
+  }).catch(function(e){
+    sr.innerHTML = '<div style="color:#ff4444;padding:8px">Errore scansione</div>';
+  });
+}
+
+function pickNet(ssid) {
+  document.getElementById('inputStaSSID').value = ssid;
+  document.getElementById('inputStaPass').focus();
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function showMsg(id, txt) {
+  var el = document.getElementById(id);
+  el.textContent = txt;
+  el.style.display = 'block';
+  setTimeout(function(){ el.style.display = 'none'; }, 5000);
+}
+</script>
+</body>
+</html>
+)rawliteral";
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SETUP
+// ═══════════════════════════════════════════════════════════════════════════
+
+void setup() {
+  Serial.begin(9600);
+  delay(500);
+
+  Serial.println();
+  Serial.println(F("═══════════════════════════════════════"));
+  Serial.println(F("  HAM-IV ROTATOR CONTROLLER v3.2"));
+  Serial.println(F("  Overlap 0-450 + Offset"));
+  Serial.println(F("═══════════════════════════════════════"));
+
+  // Pin relè — tutti OFF (sicurezza)
+  pinMode(RELAY_POWER, OUTPUT); digitalWrite(RELAY_POWER, RELAY_OFF);
+  pinMode(RELAY_BRAKE, OUTPUT); digitalWrite(RELAY_BRAKE, RELAY_OFF);
+  pinMode(RELAY_CW,    OUTPUT); digitalWrite(RELAY_CW,    RELAY_OFF);
+  pinMode(RELAY_CCW,   OUTPUT); digitalWrite(RELAY_CCW,   RELAY_OFF);
+
+  // LED
+  pinMode(LED_STATUS, OUTPUT); digitalWrite(LED_STATUS, LOW);
+
+  // Pulsanti
+  pinMode(BTN_POWER, INPUT_PULLUP);
+  pinMode(BTN_BRAKE, INPUT_PULLUP);
+  pinMode(BTN_CW,    INPUT_PULLUP);
+  pinMode(BTN_CCW,   INPUT_PULLUP);
+
+  // ADC
+  analogReadResolution(12);
+  pinMode(AZI_PIN, INPUT);
+
+  // Init filtro ADC
+  int initRead = analogRead(AZI_PIN);
+  for (int i = 0; i < ADC_BUFFER_SIZE; i++) adcBuffer[i] = initRead;
+  for (int i = 0; i < ADC_MEDIAN_SIZE; i++) medianBuffer[i] = initRead;
+  adcBufferFull = true;
+  lastStableADC = initRead;
+
+  // Carica preferenze
+  loadPreferences();
+
+  // WiFi
+  setupWiFi();
+
+  // Web server
+  setupWebServer();
+
+  Serial.println(F("Sistema pronto!"));
+  Serial.print(F("AP IP: ")); Serial.println(WiFi.softAPIP());
+  if (staConnected) {
+    Serial.print(F("Router IP: ")); Serial.println(WiFi.localIP());
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  LOOP
+// ═══════════════════════════════════════════════════════════════════════════
+
+void loop() {
+  webServer.handleClient();
+  readSerialCommands();
+  readButtons();
+  updateAzimuth();
+  handleBrakeSequence();
+  handleGoTo();
+  checkSafetyTimeout();
+  updateStatusLED();
+  checkWiFiReconnect();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  PREFERENCES (NVS)
+// ═══════════════════════════════════════════════════════════════════════════
+
+void loadPreferences() {
+  preferences.begin("hamiv", true);
+  aziMinADC    = preferences.getInt("aziMin", 20);
+  aziMaxADC    = preferences.getInt("aziMax", 2210);
+  aziOffsetPct = preferences.getFloat("offPct", 0.0);
+  aziOffsetDeg = preferences.getFloat("offDeg", 0.0);
+  apSSID       = preferences.getString("apSSID", DEFAULT_AP_SSID);
+  apPassword   = preferences.getString("apPass", DEFAULT_AP_PASSWORD);
+  apChannel    = preferences.getInt("apCh", DEFAULT_AP_CHANNEL);
+  staSSID      = preferences.getString("staSSID", "");
+  staPassword  = preferences.getString("staPass", "");
+  preferences.end();
+
+  staEnabled = (staSSID.length() > 0);
+
+  Serial.print(F("ADC range: ")); Serial.print(aziMinADC);
+  Serial.print(F(" - ")); Serial.println(aziMaxADC);
+  Serial.print(F("Offset %: ")); Serial.print(aziOffsetPct);
+  Serial.print(F("  Offset deg: ")); Serial.println(aziOffsetDeg);
+}
+
+void savePreferences() {
+  preferences.begin("hamiv", false);
+  preferences.putInt("aziMin", aziMinADC);
+  preferences.putInt("aziMax", aziMaxADC);
+  preferences.putFloat("offPct", aziOffsetPct);
+  preferences.putFloat("offDeg", aziOffsetDeg);
+  preferences.putString("apSSID", apSSID);
+  preferences.putString("apPass", apPassword);
+  preferences.putInt("apCh", apChannel);
+  preferences.putString("staSSID", staSSID);
+  preferences.putString("staPass", staPassword);
+  preferences.end();
+  Serial.println(F("Preferenze salvate"));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  WIFI
+// ═══════════════════════════════════════════════════════════════════════════
+
+void setupWiFi() {
+  WiFi.mode(WIFI_AP_STA);
+  delay(100);
+
+  // Access Point
+  WiFi.softAP(apSSID.c_str(), apPassword.c_str(), apChannel);
+  delay(500);
+  Serial.print(F("AP avviato: ")); Serial.println(apSSID);
+
+  // Station
+  if (staEnabled) {
+    connectToRouter();
+  }
+}
+
+void connectToRouter() {
+  Serial.print(F("Connessione a: ")); Serial.println(staSSID);
+  WiFi.begin(staSSID.c_str(), staPassword.c_str());
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - start) < WIFI_CONNECT_TIMEOUT) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    staConnected = true;
+    staIP = WiFi.localIP().toString();
+    reconnectCount = 0;
+    Serial.print(F("Connesso! IP: ")); Serial.println(staIP);
+  } else {
+    staConnected = false;
+    staIP = "";
+    reconnectCount++;
+    Serial.println(F("Connessione fallita"));
+  }
+}
+
+void checkWiFiReconnect() {
+  if (!staEnabled) return;
+  if (staConnected && WiFi.status() == WL_CONNECTED) return;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    staConnected = false;
+    staIP = "";
+  }
+
+  if (millis() - lastReconnectAttempt > WIFI_RECONNECT_MS) {
+    lastReconnectAttempt = millis();
+    if (reconnectCount < 10) {
+      Serial.println(F("Tentativo riconnessione..."));
+      connectToRouter();
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  WEB SERVER
+// ═══════════════════════════════════════════════════════════════════════════
+
+void setupWebServer() {
+  webServer.on("/", handleRoot);
+  webServer.on("/status", handleStatus);
+  webServer.on("/cmd", handleCommand);
+  webServer.on("/getconfig", handleGetConfig);
+  webServer.on("/saveconfig", handleSaveConfig);
+  webServer.on("/scan", handleScanNetworks);
+  webServer.begin();
+  Serial.println(F("Web server avviato"));
+}
+
+void handleRoot() {
+  webServer.send_P(200, "text/html", INDEX_HTML);
+}
+
+void handleStatus() {
+  String json = "{";
+  json += "\"power\":" + String(rotatorPowerOn ? "true" : "false");
+  json += ",\"brake\":" + String(brakeReleased ? "true" : "false");
+  json += ",\"cw\":" + String(rotatingCW ? "true" : "false");
+  json += ",\"ccw\":" + String(rotatingCCW ? "true" : "false");
+  json += ",\"displayAzi\":" + String(displayAzimuth, 1);
+  json += ",\"compassAzi\":" + String(compassAzimuth, 1);
+  json += ",\"overlap\":" + String(overlapActive ? "true" : "false");
+  json += ",\"goTo\":" + String(goToActive ? "true" : "false");
+  json += ",\"target\":" + String(targetAzimuth, 1);
+  json += ",\"adcRaw\":" + String(lastStableADC);
+  json += ",\"calMin\":" + String(aziMinADC);
+  json += ",\"calMax\":" + String(aziMaxADC);
+  json += ",\"calibrating\":" + String(calibrating ? "true" : "false");
+  json += ",\"staConn\":" + String(staConnected ? "true" : "false");
+  json += ",\"staIP\":\"" + staIP + "\"";
+  json += ",\"staSsid\":\"" + staSSID + "\"";
+  json += ",\"offsetPct\":" + String(aziOffsetPct, 1);
+  json += ",\"offsetDeg\":" + String(aziOffsetDeg, 1);
+  json += "}";
+  webServer.send(200, "application/json", json);
+}
+
+void handleCommand() {
+  if (!webServer.hasArg("c")) {
+    webServer.send(400, "application/json", "{\"ok\":false}");
+    return;
+  }
+  String cmd = webServer.arg("c");
+  processCommand(cmd);
+  webServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+void handleGetConfig() {
+  String json = "{";
+  json += "\"apSsid\":\"" + apSSID + "\"";
+  json += ",\"apCh\":" + String(apChannel);
+  json += ",\"staSsid\":\"" + staSSID + "\"";
+  json += ",\"offsetPct\":" + String(aziOffsetPct, 1);
+  json += ",\"offsetDeg\":" + String(aziOffsetDeg, 1);
+  json += ",\"aziMin\":" + String(aziMinADC);
+  json += ",\"aziMax\":" + String(aziMaxADC);
+  json += "}";
+  webServer.send(200, "application/json", json);
+}
+
+void handleSaveConfig() {
+  String type = webServer.arg("type");
+  bool ok = false;
+
+  if (type == "sta") {
+    staSSID = webServer.arg("ssid");
+    staPassword = webServer.arg("pass");
+    staEnabled = (staSSID.length() > 0);
+    savePreferences();
+    if (staEnabled) {
+      WiFi.disconnect();
+      delay(200);
+      connectToRouter();
+    } else {
+      WiFi.disconnect();
+      staConnected = false;
+      staIP = "";
+    }
+    ok = true;
+  }
+  else if (type == "ap") {
+    String newSSID = webServer.arg("ssid");
+    String newPass = webServer.arg("pass");
+    int newCh = webServer.arg("ch").toInt();
+    if (newSSID.length() > 0) {
+      apSSID = newSSID;
+      if (newPass.length() >= 8) apPassword = newPass;
+      if (newCh >= 1 && newCh <= 13) apChannel = newCh;
+      savePreferences();
+      ok = true;
+      // Riavvio AP
+      webServer.send(200, "application/json", "{\"ok\":true}");
+      delay(1000);
+      ESP.restart();
+      return;
+    }
+  }
+  else if (type == "offset") {
+    aziOffsetPct = constrain(webServer.arg("pct").toFloat(), -50.0, 50.0);
+    aziOffsetDeg = constrain(webServer.arg("deg").toFloat(), -45.0, 45.0);
+    savePreferences();
+    ok = true;
+    Serial.print(F("Offset aggiornato: %=")); Serial.print(aziOffsetPct);
+    Serial.print(F(" deg=")); Serial.println(aziOffsetDeg);
+  }
+
+  webServer.send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
+void handleScanNetworks() {
+  int n = WiFi.scanNetworks();
+  String json = "{\"nets\":[";
+  for (int i = 0; i < n; i++) {
+    if (i > 0) json += ",";
+    json += "{\"ssid\":\"" + WiFi.SSID(i) + "\",\"rssi\":" + String(WiFi.RSSI(i)) + "}";
+  }
+  json += "]}";
+  WiFi.scanDelete();
+  webServer.send(200, "application/json", json);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SERIALE USB
+// ═══════════════════════════════════════════════════════════════════════════
+
+void readSerialCommands() {
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (serialBuffer.length() > 0) {
+        processCommand(serialBuffer);
+        serialBuffer = "";
+      }
+    } else {
+      if (serialBuffer.length() < 64) serialBuffer += c;
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  PROCESS COMMAND
+// ═════════════════════════════════════════════════════════════��═════════════
+
+void processCommand(String cmd) {
+  cmd.trim();
+  cmd.toUpperCase();
+  Serial.print(F("CMD: ")); Serial.println(cmd);
+
+  if (cmd == "PWR_TOGGLE") {
+    setRotatorPower(!rotatorPowerOn);
+  }
+  else if (cmd == "BRAKE_TOGGLE") {
+    requestBrake(!brakeReleased);
+  }
+  else if (cmd == "CW:1") {
+    requestStartCW();
+  }
+  else if (cmd == "CW:0") {
+    if (rotatingCW) requestStopMotor();
+  }
+  else if (cmd == "CCW:1") {
+    requestStartCCW();
+  }
+  else if (cmd == "CCW:0") {
+    if (rotatingCCW) requestStopMotor();
+  }
+  else if (cmd == "HALT:1") {
+    emergencyHalt();
+  }
+  else if (cmd.startsWith("GOTO:")) {
+    float target = cmd.substring(5).toFloat();
+    if (target >= 0 && target <= 450) {
+      startGoTo(target);
+    } else {
+      Serial.println(F("GOTO: valore non valido (0-450)"));
+    }
+  }
+  else if (cmd == "CAL:START") {
+    startCalibration();
+  }
+  else if (cmd == "CAL:SAVE") {
+    saveCalibration();
+  }
+  else if (cmd == "STATUS?") {
+    sendDiagnostics();
+  }
+  else if (cmd.startsWith("ROTATOR_PWR:")) {
+    setRotatorPower(cmd.substring(12) == "1");
+  }
+  else if (cmd.startsWith("BRAKE:")) {
+    requestBrake(cmd.substring(6) == "1");
+  }
+  else {
+    Serial.print(F("Comando sconosciuto: ")); Serial.println(cmd);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  LETTURA PULSANTI FISICI
+// ═══════════════════════════════════════════════════════════════════════════
+
+void readButtons() {
+  unsigned long now = millis();
+
+  // POWER toggle
+  if (digitalRead(BTN_POWER) == LOW && (now - lastBtnPower) > DEBOUNCE_MS) {
+    lastBtnPower = now;
+    setRotatorPower(!rotatorPowerOn);
+  }
+
+  // BRAKE toggle
+  if (digitalRead(BTN_BRAKE) == LOW && (now - lastBtnBrake) > DEBOUNCE_MS) {
+    lastBtnBrake = now;
+    requestBrake(!brakeReleased);
+  }
+
+  // CW — momentaneo (NA)
+  bool btnCW = (digitalRead(BTN_CW) == LOW);
+  if (btnCW && !prevBtnCW) {
+    requestStartCW();
+  } else if (!btnCW && prevBtnCW) {
+    if (rotatingCW) requestStopMotor();
+  }
+  prevBtnCW = btnCW;
+
+  // CCW — momentaneo (NA)
+  bool btnCCW = (digitalRead(BTN_CCW) == LOW);
+  if (btnCCW && !prevBtnCCW) {
+    requestStartCCW();
+  } else if (!btnCCW && prevBtnCCW) {
+    if (rotatingCCW) requestStopMotor();
+  }
+  prevBtnCCW = btnCCW;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  AZIMUTH — LETTURA ADC + FILTRO + OVERLAP + OFFSET
+// ═══════════════════════════════════════════════════════════════════════════
+
+void updateAzimuth() {
+  if (millis() - lastAziRead < AZI_READ_INTERVAL) return;
+  lastAziRead = millis();
+
+  // Lettura ADC con buffer circolare
+  int rawADC = analogRead(AZI_PIN);
+  adcBuffer[adcBufferIdx] = rawADC;
+  adcBufferIdx = (adcBufferIdx + 1) % ADC_BUFFER_SIZE;
+  if (adcBufferIdx == 0) adcBufferFull = true;
+
+  // Media del buffer
+  int count = adcBufferFull ? ADC_BUFFER_SIZE : adcBufferIdx;
+  if (count == 0) return;
+  long sum = 0;
+  for (int i = 0; i < count; i++) sum += adcBuffer[i];
+  int avgADC = sum / count;
+
+  // Filtro mediana
+  medianBuffer[medianBufferIdx] = avgADC;
+  medianBufferIdx = (medianBufferIdx + 1) % ADC_MEDIAN_SIZE;
+
+  int sortedBuf[ADC_MEDIAN_SIZE];
+  memcpy(sortedBuf, medianBuffer, sizeof(medianBuffer));
+  int filteredADC = getMedian(sortedBuf, ADC_MEDIAN_SIZE);
+
+  lastStableADC = filteredADC;
+
+  // Calibrazione in corso: traccia min/max
+  if (calibrating) {
+    if (filteredADC < calMinADC) calMinADC = filteredADC;
+    if (filteredADC > calMaxADC) calMaxADC = filteredADC;
+  }
+
+  // ═══ CALCOLO AZIMUTH CON OFFSET E OVERLAP ═══
+
+  // Applica offset percentuale all'ADC
+  int adcRange = aziMaxADC - aziMinADC;
+  float offsetADC = (aziOffsetPct / 100.0) * adcRange;
+  float adjustedADC = (float)filteredADC + offsetADC;
+
+  // Mappa ADC → 0-450 gradi (con overlap)
+  rawAzimuth = ((adjustedADC - aziMinADC) / (float)adcRange) * 450.0;
+
+  // Applica offset in gradi
+  rawAzimuth += aziOffsetDeg;
+
+  // Limita a 0-450
+  if (rawAzimuth < 0) rawAzimuth = 0;
+  if (rawAzimuth > 450) rawAzimuth = 450;
+
+  // Filtro esponenziale per smoothing
+  filteredAzimuth = filteredAzimuth * 0.85 + rawAzimuth * 0.15;
+  displayAzimuth = filteredAzimuth;
+
+  // Calcola azimuth bussola (0-360) e stato overlap
+  if (displayAzimuth > 360.0) {
+    overlapActive = true;
+    compassAzimuth = displayAzimuth - 360.0;  // 360-450 → 0-90
+  } else {
+    overlapActive = false;
+    compassAzimuth = displayAzimuth;
+  }
+}
+
+int getMedian(int* arr, int size) {
+  // Bubble sort semplice per array piccolo
+  for (int i = 0; i < size - 1; i++) {
+    for (int j = 0; j < size - i - 1; j++) {
+      if (arr[j] > arr[j + 1]) {
+        int temp = arr[j];
+        arr[j] = arr[j + 1];
+        arr[j + 1] = temp;
+      }
+    }
+  }
+  return arr[size / 2];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CONTROLLO ROTATORE
+// ═══════════════════════════════════════════════════════════════════════════
+
+void setRotatorPower(bool on) {
+  if (on == rotatorPowerOn) return;
+
+  if (!on) {
+    // Spegnimento: ferma tutto prima
+    if (rotatingCW || rotatingCCW) {
+      emergencyHalt();
+      return;
+    }
+    if (brakeReleased) {
+      requestBrake(false);
+    }
+  }
+
+  rotatorPowerOn = on;
+  digitalWrite(RELAY_POWER, on ? RELAY_ON : RELAY_OFF);
+  Serial.print(F("POWER: ")); Serial.println(on ? "ON" : "OFF");
+}
+
+void requestBrake(bool release) {
+  if (!rotatorPowerOn && release) {
+    Serial.println(F("Errore: POWER off, brake non rilasciabile"));
+    return;
+  }
+
+  brakeReleased = release;
+  digitalWrite(RELAY_BRAKE, release ? RELAY_ON : RELAY_OFF);
+  Serial.print(F("BRAKE: ")); Serial.println(release ? "RELEASED" : "ENGAGED");
+
+  // Se freno inserito, annulla qualsiasi pending
+  if (!release) {
+    brakeEngagePending = false;
+  }
+}
+
+void requestStartCW() {
+  if (!rotatorPowerOn) {
+    Serial.println(F("Errore: POWER off"));
+    return;
+  }
+  if (rotatingCCW) {
+    requestStopMotor();
+    delay(DIRECTION_CHANGE_MS);
+  }
+
+  // Auto-release brake
+  if (!brakeReleased) {
+    requestBrake(true);
+    delay(BRAKE_DELAY_MS);
+  }
+
+  brakeEngagePending = false;
+  rotatingCW = true;
+  rotatingCCW = false;
+  goToActive = false;
+  rotationStart = millis();
+  digitalWrite(RELAY_CW, RELAY_ON);
+  Serial.println(F("ROTATOR: CW"));
+}
+
+void requestStartCCW() {
+  if (!rotatorPowerOn) {
+    Serial.println(F("Errore: POWER off"));
+    return;
+  }
+  if (rotatingCW) {
+    requestStopMotor();
+    delay(DIRECTION_CHANGE_MS);
+  }
+
+  // Auto-release brake
+  if (!brakeReleased) {
+    requestBrake(true);
+    delay(BRAKE_DELAY_MS);
+  }
+
+  brakeEngagePending = false;
+  rotatingCCW = true;
+  rotatingCW = false;
+  goToActive = false;
+  rotationStart = millis();
+  digitalWrite(RELAY_CCW, RELAY_ON);
+  Serial.println(F("ROTATOR: CCW"));
+}
+
+void requestStopMotor() {
+  digitalWrite(RELAY_CW, RELAY_OFF);
+  digitalWrite(RELAY_CCW, RELAY_OFF);
+  rotatingCW = false;
+  rotatingCCW = false;
+  rotationStart = 0;
+  Serial.println(F("ROTATOR: STOP"));
+
+  // Inserisci freno dopo ritardo
+  brakeEngagePending = true;
+  brakeEngageStart = millis();
+}
+
+void emergencyHalt() {
+  // IMMEDIATO: tutto off
+  digitalWrite(RELAY_CW, RELAY_OFF);
+  digitalWrite(RELAY_CCW, RELAY_OFF);
+  digitalWrite(RELAY_BRAKE, RELAY_OFF);
+
+  rotatingCW = false;
+  rotatingCCW = false;
+  brakeReleased = false;
+  goToActive = false;
+  targetAzimuth = -1;
+  brakeEngagePending = false;
+  rotationStart = 0;
+
+  Serial.println(F("!!! EMERGENCY HALT !!!"));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  BRAKE SEQUENCE (inserimento ritardato dopo stop)
+// ═════════════════════════════════════════════════════════════════��═════════
+
+void handleBrakeSequence() {
+  if (!brakeEngagePending) return;
+
+  if (millis() - brakeEngageStart >= MOTOR_STOP_DELAY_MS) {
+    requestBrake(false);
+    brakeEngagePending = false;
+    Serial.println(F("Brake auto-engaged dopo stop"));
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  GOTO — POSIZIONAMENTO AUTOMATICO (0-450)
+// ═══════════════════════════════════════════════════════════════════════════
+
+void startGoTo(float target) {
+  if (!rotatorPowerOn) {
+    Serial.println(F("GOTO: POWER off"));
+    return;
+  }
+  if (target < 0 || target > 450) {
+    Serial.println(F("GOTO: target fuori range (0-450)"));
+    return;
+  }
+
+  targetAzimuth = target;
+  goToActive = true;
+  goToStart = millis();
+
+  Serial.print(F("GOTO: target=")); Serial.print(target, 1);
+  Serial.print(F(" attuale=")); Serial.println(displayAzimuth, 1);
+}
+
+void handleGoTo() {
+  if (!goToActive) return;
+
+  // Timeout
+  if (millis() - goToStart > GOTO_TIMEOUT_MS) {
+    Serial.println(F("GOTO: TIMEOUT!"));
+    requestStopMotor();
+    goToActive = false;
+    targetAzimuth = -1;
+    return;
+  }
+
+  float diff = targetAzimuth - displayAzimuth;
+
+  // Raggiunto target?
+  if (abs(diff) <= GOTO_TOLERANCE) {
+    Serial.println(F("GOTO: TARGET RAGGIUNTO!"));
+    requestStopMotor();
+    goToActive = false;
+    targetAzimuth = -1;
+    return;
+  }
+
+  // Decidi direzione (nel range 0-450 è lineare, non serve wrap-around)
+  if (diff > 0 && !rotatingCW) {
+    if (rotatingCCW) {
+      requestStopMotor();
+      delay(DIRECTION_CHANGE_MS);
+    }
+    requestStartCW();
+    goToActive = true; // re-set perché requestStartCW lo resetta
+  }
+  else if (diff < 0 && !rotatingCCW) {
+    if (rotatingCW) {
+      requestStopMotor();
+      delay(DIRECTION_CHANGE_MS);
+    }
+    requestStartCCW();
+    goToActive = true;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SAFETY TIMEOUT
+// ═══════════════════════════════════════════════════════════════════════════
+
+void checkSafetyTimeout() {
+  if (!rotatingCW && !rotatingCCW) return;
+  if (rotationStart == 0) return;
+
+  if (millis() - rotationStart > SAFETY_TIMEOUT_MS) {
+    Serial.println(F("SAFETY TIMEOUT: rotazione troppo lunga!"));
+    emergencyHalt();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  LED STATUS
+// ═══════════════════════════════════════════════════════════════════════════
+
+void updateStatusLED() {
+  unsigned long now = millis();
+  int blinkRate;
+
+  if (!rotatorPowerOn) {
+    blinkRate = 2000;  // lento: power off
+  } else if (rotatingCW || rotatingCCW) {
+    blinkRate = 100;   // veloce: in rotazione
+  } else if (goToActive) {
+    blinkRate = 250;   // medio: goto attivo
+  } else if (overlapActive) {
+    blinkRate = 500;   // overlap
+  } else {
+    blinkRate = 1000;  // normale: power on, fermo
+  }
+
+  if (now - lastLedBlink >= (unsigned long)blinkRate) {
+    lastLedBlink = now;
+    ledState = !ledState;
+    digitalWrite(LED_STATUS, ledState ? HIGH : LOW);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CALIBRAZIONE
+// ═══════════════════════════════════════════════════════════════════════════
+
+void startCalibration() {
+  calibrating = true;
+  calMinADC = 4095;
+  calMaxADC = 0;
+  Serial.println(F("CALIBRAZIONE AVVIATA — Ruota il rotore da 0 a 450 gradi"));
+  Serial.println(F("Poi invia CAL:SAVE per salvare"));
+}
+
+void saveCalibration() {
+  if (!calibrating) {
+    Serial.println(F("Nessuna calibrazione in corso"));
+    return;
+  }
+  calibrating = false;
+
+  if (calMaxADC - calMinADC < 100) {
+    Serial.println(F("ERRORE: range ADC troppo piccolo, calibrazione annullata"));
+    return;
+  }
+
+  aziMinADC = calMinADC;
+  aziMaxADC = calMaxADC;
+  savePreferences();
+
+  Serial.print(F("CALIBRAZIONE SALVATA: ADC "));
+  Serial.print(aziMinADC); Serial.print(F(" - ")); Serial.println(aziMaxADC);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  DIAGNOSTICA SERIALE
+// ═══════════════════════════════════════════════════════════════════════════
+
+void sendDiagnostics() {
+  Serial.println(F("═══════════════════════════════════════"));
+  Serial.println(F("  STATO SISTEMA v3.2"));
+  Serial.println(F("═══════════════════════════════════════"));
+  Serial.print(F("Power: "));    Serial.println(rotatorPowerOn ? "ON" : "OFF");
+  Serial.print(F("Brake: "));    Serial.println(brakeReleased ? "RELEASED" : "ENGAGED");
+  Serial.print(F("Motor CW: ")); Serial.println(rotatingCW ? "ON" : "OFF");
+  Serial.print(F("Motor CCW: "));Serial.println(rotatingCCW ? "ON" : "OFF");
+  Serial.print(F("Azimuth: "));  Serial.print(displayAzimuth, 1); Serial.println(" deg");
+  Serial.print(F("Compass: "));  Serial.print(compassAzimuth, 1); Serial.println(" deg");
+  Serial.print(F("Overlap: "));  Serial.println(overlapActive ? "YES" : "NO");
+  Serial.print(F("GoTo: "));     Serial.println(goToActive ? "ACTIVE" : "OFF");
+  Serial.print(F("Target: "));   Serial.println(targetAzimuth, 1);
+  Serial.print(F("ADC raw: "));  Serial.println(lastStableADC);
+  Serial.print(F("ADC range: "));Serial.print(aziMinADC); Serial.print(F("-")); Serial.println(aziMaxADC);
+  Serial.print(F("Offset %: ")); Serial.println(aziOffsetPct, 1);
+  Serial.print(F("Offset deg: "));Serial.println(aziOffsetDeg, 1);
+  Serial.print(F("AP SSID: "));  Serial.println(apSSID);
+  Serial.print(F("AP IP: "));    Serial.println(WiFi.softAPIP());
+  Serial.print(F("STA SSID: ")); Serial.println(staSSID.length() > 0 ? staSSID : "(none)");
+  Serial.print(F("STA conn: ")); Serial.println(staConnected ? "YES" : "NO");
+  if (staConnected) { Serial.print(F("STA IP: ")); Serial.println(staIP); }
+  Serial.print(F("Uptime: "));   Serial.print(millis() / 1000); Serial.println("s");
+  Serial.print(F("Free heap: "));Serial.println(ESP.getFreeHeap());
+  Serial.println(F("═══════════════════════════════════════"));
+}
