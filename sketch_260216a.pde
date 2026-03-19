@@ -10,7 +10,7 @@ import java.text.SimpleDateFormat;
 // ═══════════════════════════════════════════════════════════════════════════
 
 final String APP_NAME = "Remote Control";
-final String APP_VERSION = "2.1";
+final String APP_VERSION = "3.0";
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  TEMA COLORI
@@ -277,6 +277,12 @@ int brakeDelayMs = 500;
 int brakeDelayMin = 100;
 int brakeDelayMax = 3000;
 boolean brakeSliderDragging = false;
+float smoothingFactor = 0.15;       // EMA coefficient applied to received azimuth data
+float relayCompensation = 17.0;     // Relay compensation value (read from ESP32)
+boolean smoothSliderDragging = false;
+boolean relayCompSliderDragging = false;
+long lastHttpPoll = 0;
+int httpPollFailCount = 0;
 float targetAzimuth = -1;  // -1 = nessun target
 boolean goToActive = false;
 float goToTarget = -1;
@@ -390,9 +396,12 @@ void draw() {
     if (data != null) processAntennaData(data.trim());
   }
   
-  if (rotConnMode == 1 && rotClient != null && rotClient.available() > 0) {
-    String data = rotClient.readStringUntil('\n');
-    if (data != null) processRotatorData(data.trim());
+  if (rotConnMode == 1 && rotConnected) {
+    // HTTP polling for WiFi mode
+    if (millis() - lastHttpPoll > 500) {
+      lastHttpPoll = millis();
+      thread("pollRotatorStatusThread");
+    }
   }
   
   if (transitioning) {
@@ -735,7 +744,7 @@ void drawAzimuthMap() {
   textFont(fontBold);
   textSize(16);
   textAlign(CENTER, CENTER);
-  text(nf(displayAzimuth, 1, 1) + "°", 0, -5);
+  text(int(displayAzimuth) + "°", 0, -5);
   
   fill(theme.textDim);
   textSize(9);
@@ -839,22 +848,21 @@ void drawBrakeButton(String label, float x, float y, float w, float h, int idx, 
   pushMatrix();
   if (hover) translate(0, -3 * animValue);
   
-  // Enhanced shadow
+  // Shadow
   fill(0, 0, 0, 60 + 60 * animValue);
   noStroke();
   rect(x + 2, y + 3, w, h, 8);
   
-  // Background with red stripes
-  color bgColor = !enabled ? theme.disabled : brakeReleased ? color(255, 80, 60) : theme.haltColor;
-  
-  // Draw striped background
+  // Background: orange-red when released (danger), dark red when engaged
+  color bgColor = !enabled ? theme.disabled
+                : brakeReleased ? color(220, 70, 30) : color(120, 20, 20);
   fill(bgColor);
   noStroke();
   rect(x, y, w, h, 8);
   
   if (enabled) {
-    // Red diagonal stripes
-    stroke(color(180, 0, 0), brakeReleased ? 200 : 120);
+    // Diagonal danger stripes
+    stroke(brakeReleased ? color(255, 140, 60) : color(180, 0, 0), brakeReleased ? 200 : 100);
     strokeWeight(2);
     for (float i = -h; i < w + h; i += 8) {
       line(x + i, y, x + i + h, y + h);
@@ -863,28 +871,49 @@ void drawBrakeButton(String label, float x, float y, float w, float h, int idx, 
   
   // Border
   noFill();
-  stroke(brakeReleased ? color(255, 100, 80) : theme.haltColor);
+  stroke(brakeReleased ? color(255, 100, 40) : color(180, 30, 30));
   strokeWeight(hover ? 2 : 1);
   rect(x, y, w, h, 8);
   
-  // Glow effect on hover
-  if (hover && enabled) {
+  // Glow when released (danger state)
+  if (brakeReleased && enabled) {
+    noFill();
+    stroke(color(255, 80, 30), 140 + 80 * sin(millis() * 0.008));
+    strokeWeight(3);
+    rect(x - 2, y - 2, w + 4, h + 4, 10);
+    stroke(color(255, 80, 30), 60 + 40 * sin(millis() * 0.008));
+    strokeWeight(5);
+    rect(x - 5, y - 5, w + 10, h + 10, 13);
+  } else if (hover && enabled) {
     noFill();
     stroke(theme.haltColor, 100 * animValue);
     strokeWeight(2);
     rect(x - 1, y - 1, w + 2, h + 2, 9);
-    stroke(theme.haltColor, 50 * animValue);
-    strokeWeight(4);
-    rect(x - 3, y - 3, w + 6, h + 6, 11);
   }
   
+  // LED stato: verde = rilasciato, rosso = inserito
+  float ledX = x + w - 9;
+  float ledY = y + 9;
+  if (enabled) {
+    fill(brakeReleased ? theme.success : theme.error, 80);
+    noStroke();
+    ellipse(ledX, ledY, 14, 14);
+  }
+  fill(enabled ? (brakeReleased ? theme.success : theme.error) : theme.disabled);
+  noStroke();
+  ellipse(ledX, ledY, 8, 8);
+  
+  // Label
   fill(enabled ? theme.text : theme.textDim);
   textFont(fontBold);
   textSize(10);
   textAlign(CENTER, CENTER);
-  text(label, x + w/2, y + h/2 - 4);
+  text(label, x + w/2, y + h/2 - 5);
+  
+  // Sub-text: stato corrente ENGAGED / RELEASED
   textSize(8);
-  text("RELEASE", x + w/2, y + h/2 + 8);
+  fill(brakeReleased ? color(255, 140, 60) : color(200, 200, 200));
+  text(brakeReleased ? "RELEASED" : "ENGAGED", x + w/2, y + h/2 + 7);
   
   popMatrix();
 }
@@ -1051,6 +1080,57 @@ void drawBrakeDelaySlider(float x, float y) {
   fill(brakeReleased ? theme.success : theme.warning);
   textSize(8);
   text(brakeReleased ? "BRAKE FREE" : "BRAKE ON", x, y + 28);
+  
+  // Compact smooth & relay comp display
+  fill(theme.textDim);
+  textFont(fontRegular);
+  textSize(8);
+  textAlign(CENTER, TOP);
+  text("Smooth: " + nf(smoothingFactor, 1, 2) + "  |  RelayComp: " + nf(relayCompensation, 1, 1) + "\u00b0", x, y + 40);
+}
+
+void drawSmoothingSlider(float x, float y) {
+  // Smooth factor slider for direct panel use
+  float sliderW = 200, sliderH = 4, knobSize = 14;
+  float sliderX = x - sliderW / 2;
+  
+  fill(theme.textDim);
+  textFont(fontRegular);
+  textSize(9);
+  textAlign(CENTER, TOP);
+  text("Smoothing", x, y - 18);
+  
+  fill(theme.secondary);
+  stroke(theme.border);
+  strokeWeight(1);
+  rect(sliderX, y, sliderW, sliderH, 2);
+  
+  float knobX = map(smoothingFactor, 0.01, 1.0, sliderX, sliderX + sliderW);
+  boolean hoverKnob = dist(mouseX, mouseY, knobX, y + sliderH/2) < knobSize;
+  
+  if (hoverKnob || smoothSliderDragging) {
+    fill(theme.accent, 60);
+    noStroke();
+    ellipse(knobX, y + sliderH/2, knobSize + 8, knobSize + 8);
+  }
+  fill(smoothSliderDragging ? theme.accent : theme.text);
+  stroke(theme.accent);
+  strokeWeight(2);
+  ellipse(knobX, y + sliderH/2, knobSize, knobSize);
+  
+  fill(theme.text);
+  textFont(fontBold);
+  textSize(10);
+  textAlign(CENTER, TOP);
+  text(nf(smoothingFactor, 1, 2), x, y + 15);
+}
+
+void drawRelayCompDisplay(float x, float y) {
+  fill(theme.textDim);
+  textFont(fontRegular);
+  textSize(9);
+  textAlign(CENTER, TOP);
+  text("Relay Comp: " + nf(relayCompensation, 1, 1) + "\u00b0", x, y);
 }
 
 void drawStatusBar() {
@@ -1082,7 +1162,7 @@ void drawStatusBar() {
   textFont(fontBold);
   textSize(11);
   textAlign(LEFT, CENTER);
-  text("AZ:" + nf(displayAzimuth, 1, 1) + "°", startX + spacing * 5, iconY);
+  text("AZ:" + int(displayAzimuth) + "°", startX + spacing * 5, iconY);
   
   fill(theme.textDim);
   textFont(fontRegular);
@@ -1463,7 +1543,64 @@ void drawSystemSettings(float px, float py) {
   textAlign(LEFT, CENTER);
   text("Modalità Debug", px + 55, py + 49);
   
-  float btnY = py + 90;
+  // Smoothing factor slider
+  float sliderW = 220, sliderH = 4, knobSize = 14;
+  float sfY = py + 85;
+  float sfSliderX = px + 130;
+  
+  fill(theme.textDim);
+  textFont(fontRegular);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text("Smooth Factor:", px + 30, sfY + 2);
+  
+  fill(theme.secondary);
+  stroke(theme.border);
+  strokeWeight(1);
+  rect(sfSliderX, sfY - 2, sliderW, sliderH, 2);
+  
+  float sfKnobX = map(smoothingFactor, 0.01, 1.0, sfSliderX, sfSliderX + sliderW);
+  boolean sfHover = dist(mouseX, mouseY, sfKnobX, sfY - 2 + sliderH/2) < knobSize;
+  if (sfHover || smoothSliderDragging) { fill(theme.accent, 60); noStroke(); ellipse(sfKnobX, sfY - 2 + sliderH/2, knobSize + 8, knobSize + 8); }
+  fill(smoothSliderDragging ? theme.accent : theme.text);
+  stroke(theme.accent);
+  strokeWeight(2);
+  ellipse(sfKnobX, sfY - 2 + sliderH/2, knobSize, knobSize);
+  fill(theme.text);
+  textFont(fontBold);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text(nf(smoothingFactor, 1, 2), sfSliderX + sliderW + 10, sfY + 2);
+  
+  // Relay compensation slider
+  float rcY = sfY + 38;
+  float rcSliderX = px + 130;
+  
+  fill(theme.textDim);
+  textFont(fontRegular);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text("Relay Comp (°):", px + 30, rcY + 2);
+  
+  fill(theme.secondary);
+  stroke(theme.border);
+  strokeWeight(1);
+  rect(rcSliderX, rcY - 2, sliderW, sliderH, 2);
+  
+  float rcKnobX = map(relayCompensation, 0, 30, rcSliderX, rcSliderX + sliderW);
+  boolean rcHover = dist(mouseX, mouseY, rcKnobX, rcY - 2 + sliderH/2) < knobSize;
+  if (rcHover || relayCompSliderDragging) { fill(theme.warning, 60); noStroke(); ellipse(rcKnobX, rcY - 2 + sliderH/2, knobSize + 8, knobSize + 8); }
+  fill(relayCompSliderDragging ? theme.warning : theme.text);
+  stroke(theme.warning);
+  strokeWeight(2);
+  ellipse(rcKnobX, rcY - 2 + sliderH/2, knobSize, knobSize);
+  fill(theme.text);
+  textFont(fontBold);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text(nf(relayCompensation, 1, 1) + "\u00b0", rcSliderX + sliderW + 10, rcY + 2);
+  
+  float btnY = py + 170;
   boolean resetHover = mouseX > px + 30 && mouseX < px + 150 && mouseY > btnY && mouseY < btnY + 35;
   
   fill(resetHover ? lerpColor(theme.warning, theme.text, 0.2) : theme.warning);
@@ -1737,42 +1874,80 @@ void mouseReleased() {
     deactivateRotatorRelays();
   }
   
-  // Release brake button
-  if (brakeButtonPressed) {
-    releaseBrake();
+  // Send commands when sliders finish dragging
+  if (brakeSliderDragging) {
+    sendRotatorCommand("DELAY:" + brakeDelayMs);
+  }
+  if (smoothSliderDragging) {
+    sendRotatorCommand("SMOOTH:" + nf(smoothingFactor, 1, 2));
+  }
+  if (relayCompSliderDragging) {
+    sendRotatorCommand("RELAYCOMP:" + nf(relayCompensation, 1, 1));
   }
   
-  // Stop slider dragging
-  if (brakeSliderDragging) {
-    brakeSliderDragging = false;
-  }
+  // Stop all slider dragging
+  brakeSliderDragging = false;
+  smoothSliderDragging = false;
+  relayCompSliderDragging = false;
 }
 
 void mouseDragged() {
-  // Handle brake delay slider dragging
-  float centerX = mapCenterX;
-  float btnY = mapCenterY + 155;
-  float btnH = 38;
-  float sliderY = btnY + btnH + (goToActive ? 70 : 55);
-  float sliderW = 200;
-  float sliderH = 4;
-  float sliderX = centerX - sliderW / 2;
-  
-  // Check if mouse started on the knob
-  float knobX = map(brakeDelayMs, brakeDelayMin, brakeDelayMax, sliderX, sliderX + sliderW);
-  float knobSize = 14;
-  
-  // Start dragging if mouse is near knob
-  if (!brakeSliderDragging && dist(mouseX, mouseY, knobX, sliderY + sliderH/2) < knobSize) {
-    brakeSliderDragging = true;
+  // Handle sliders in rotator panel (screen 0)
+  if (currentScreen == 0) {
+    float centerX = mapCenterX;
+    float btnY = mapCenterY + 155;
+    float btnH = 38;
+    float brakeSliderY = btnY + btnH + (goToActive ? 70 : 55);
+    float sliderW = 200, sliderH = 4, sliderX = centerX - sliderW / 2;
+    float knobSize = 14;
+    
+    // Brake delay knob
+    float brakeKnobX = map(brakeDelayMs, brakeDelayMin, brakeDelayMax, sliderX, sliderX + sliderW);
+    if (!brakeSliderDragging && !smoothSliderDragging &&
+        dist(mouseX, mouseY, brakeKnobX, brakeSliderY + sliderH/2) < knobSize) {
+      brakeSliderDragging = true;
+    }
+    if (brakeSliderDragging) {
+      float newValue = map(constrain(mouseX, sliderX, sliderX + sliderW), sliderX, sliderX + sliderW, brakeDelayMin, brakeDelayMax);
+      brakeDelayMs = int(newValue / 50) * 50;
+      brakeDelayMs = constrain(brakeDelayMs, brakeDelayMin, brakeDelayMax);
+      return;
+    }
   }
   
-  // Update slider value if dragging
-  if (brakeSliderDragging) {
-    float newValue = map(constrain(mouseX, sliderX, sliderX + sliderW), sliderX, sliderX + sliderW, brakeDelayMin, brakeDelayMax);
-    // Snap to multiples of 50ms
-    brakeDelayMs = int(newValue / 50) * 50;
-    brakeDelayMs = constrain(brakeDelayMs, brakeDelayMin, brakeDelayMax);
+  // Handle sliders in system settings (screen 1, tab 2)
+  if (currentScreen == 1 && currentSettingsTab == 2) {
+    float px = 40, py = 60;
+    float spY = py + 90;
+    float sliderW = 220, sliderH = 4, knobSize = 14;
+    float sfSliderX = px + 130;
+    float sfY = spY + 85;
+    float rcSliderX = px + 130;
+    float rcY = sfY + 38;
+    
+    // Smooth factor knob
+    float sfKnobX = map(smoothingFactor, 0.01, 1.0, sfSliderX, sfSliderX + sliderW);
+    if (!smoothSliderDragging && !relayCompSliderDragging &&
+        dist(mouseX, mouseY, sfKnobX, sfY - 2 + sliderH/2) < knobSize) {
+      smoothSliderDragging = true;
+    }
+    if (smoothSliderDragging) {
+      smoothingFactor = map(constrain(mouseX, sfSliderX, sfSliderX + sliderW), sfSliderX, sfSliderX + sliderW, 0.01, 1.0);
+      smoothingFactor = constrain(smoothingFactor, 0.01, 1.0);
+      return;
+    }
+    
+    // Relay comp knob
+    float rcKnobX = map(relayCompensation, 0, 30, rcSliderX, rcSliderX + sliderW);
+    if (!smoothSliderDragging && !relayCompSliderDragging &&
+        dist(mouseX, mouseY, rcKnobX, rcY - 2 + sliderH/2) < knobSize) {
+      relayCompSliderDragging = true;
+    }
+    if (relayCompSliderDragging) {
+      relayCompensation = map(constrain(mouseX, rcSliderX, rcSliderX + sliderW), rcSliderX, rcSliderX + sliderW, 0.0, 30.0);
+      relayCompensation = constrain(relayCompensation, 0.0, 30.0);
+      return;
+    }
   }
 }
 
@@ -1923,22 +2098,17 @@ void checkRotatorButtonsPressed() {
 }
 
 void activateBrake() {
-  if (!brakeButtonPressed && systemOn && rotatorPowerOn) {
-    brakeButtonPressed = true;
-    brakeReleased = true;
-    
-    addDebugLog("Brake: Premuto → RELEASED");
+  if (!systemOn || !rotatorPowerOn) return;
+  
+  brakeReleased = !brakeReleased;
+  brakeButtonPressed = brakeReleased;
+  
+  if (brakeReleased) {
+    addDebugLog("Brake: RELEASED");
     sendRotatorCommand("BRAKE:1");
     addNotification("Brake Released", SUCCESS);
-  }
-}
-
-void releaseBrake() {
-  if (brakeButtonPressed) {
-    brakeButtonPressed = false;
-    brakeReleased = false;
-    
-    addDebugLog("Brake: Rilasciato → ENGAGED with delay " + brakeDelayMs + "ms");
+  } else {
+    addDebugLog("Brake: ENGAGED delay " + brakeDelayMs + "ms");
     sendRotatorCommand("BRAKE:0:" + brakeDelayMs);
     addNotification("Brake Engaged", WARNING);
   }
@@ -2252,7 +2422,7 @@ void checkSystemSettingsClick(float px, float py) {
     return;
   }
   
-  float btnY = py + 90;
+  float btnY = py + 170;
   if (mouseX > px + 30 && mouseX < px + 150 && mouseY > btnY && mouseY < btnY + 35) {
     resetToDefaults();
     addNotification("Reset completato", WARNING);
@@ -2537,23 +2707,27 @@ void connectRotESP32() {
       addDebugLog("ESP32 Rotatore connesso via USB!");
       
     } else {
-      // WiFi Mode
-      addDebugLog("Connessione ESP32 Rotatore via WiFi: " + rotWifiIP + ":" + rotWifiPort + "...");
-      
-      if (rotClient != null) { try { rotClient.stop(); } catch (Exception e) {} }
-      rotClient = new Client(this, rotWifiIP, rotWifiPort);
-      
-      if (rotClient.active()) {
-        rotConnected = true;
-        addNotification("ESP32 Rotatore connesso (WiFi)", SUCCESS);
-        addDebugLog("ESP32 Rotatore connesso via WiFi!");
-      } else {
+      // WiFi HTTP Mode — test con GET /status
+      addDebugLog("Test HTTP: http://" + rotWifiIP + ":" + rotWifiPort + "/status...");
+      try {
+        String url = "http://" + rotWifiIP + ":" + rotWifiPort + "/status";
+        JSONObject statusJson = loadJSONObject(url);
+        if (statusJson != null) {
+          rotConnected = true;
+          addNotification("ESP32 Rotatore connesso (HTTP)", SUCCESS);
+          addDebugLog("ESP32 Rotatore connesso via HTTP!");
+          parseRotatorStatusFromJson(statusJson);
+        } else {
+          addNotification("Impossibile connettere a " + rotWifiIP, ERROR);
+          addDebugLog("Connessione HTTP fallita: risposta null");
+        }
+      } catch (Exception he) {
         addNotification("Impossibile connettere a " + rotWifiIP, ERROR);
-        rotClient = null;
+        addDebugLog("ERRORE HTTP: " + he.getMessage());
       }
     }
     
-    if (rotConnected) {
+    if (rotConnected && rotConnMode == 0) {
       delay(100);
       sendRotatorCommand("ROTATOR_PWR:" + (rotatorPowerOn ? "1" : "0"));
     }
@@ -2608,13 +2782,20 @@ void sendRotatorCommand(String cmd) {
     if (rotConnMode == 0 && rotSerial != null) {
       rotSerial.write(cmd + "\n");
       addDebugLog("TX ROT: " + cmd);
-    } else if (rotConnMode == 1 && rotClient != null) {
-      rotClient.write(cmd + "\n");
-      addDebugLog("TX ROT: " + cmd);
+    } else if (rotConnMode == 1) {
+      // HTTP GET request to /command?cmd=...
+      try {
+        String encodedCmd = java.net.URLEncoder.encode(cmd, "UTF-8");
+        String url = "http://" + rotWifiIP + ":" + rotWifiPort + "/command?cmd=" + encodedCmd;
+        loadStrings(url);
+        addDebugLog("TX ROT HTTP: " + cmd);
+      } catch (Exception he) {
+        addDebugLog("ERRORE TX ROT HTTP: " + he.getMessage());
+      }
     }
   } catch (Exception e) {
     addDebugLog("ERRORE TX ROT: " + e.getMessage());
-    rotConnected = false;
+    if (rotConnMode == 0) rotConnected = false;
   }
 }
 
@@ -2643,12 +2824,13 @@ void processRotatorData(String data) {
   
   if (data.startsWith("AZI:")) {
     try { 
-      currentAzimuth = Float.parseFloat(data.substring(4));
+      float rawAzi = Float.parseFloat(data.substring(4));
+      // Apply EMA smoothing locally too
+      currentAzimuth = smoothingFactor * rawAzi + (1.0 - smoothingFactor) * currentAzimuth;
       
       // Check if Go To target is reached
       if (goToActive && targetAzimuth >= 0) {
         float diff = abs(currentAzimuth - targetAzimuth);
-        // Handle wrap-around (e.g., 359° to 1°)
         if (diff > 180) diff = 360 - diff;
         
         if (diff < 2.0) {
@@ -2662,6 +2844,12 @@ void processRotatorData(String data) {
     } catch (Exception e) {
       addDebugLog("ERRORE parsing AZI: " + data + " - " + e.getMessage());
     }
+  }
+  else if (data.startsWith("SMOOTH:")) {
+    try { smoothingFactor = constrain(Float.parseFloat(data.substring(7)), 0.01, 1.0); } catch (Exception e) {}
+  }
+  else if (data.startsWith("RELAYCOMP:")) {
+    try { relayCompensation = Float.parseFloat(data.substring(10)); } catch (Exception e) {}
   }
   else if (data.startsWith("ROTATOR:")) {
     String status = data.substring(8);
@@ -2705,6 +2893,63 @@ void serialEvent(Serial p) {
     }
   } catch (Exception e) {
     addDebugLog("ERRORE serialEvent: " + e.getMessage());
+  }
+}
+
+// HTTP polling thread for WiFi rotator mode
+void pollRotatorStatusThread() {
+  try {
+    String url = "http://" + rotWifiIP + ":" + rotWifiPort + "/status";
+    JSONObject json = loadJSONObject(url);
+    if (json != null) {
+      parseRotatorStatusFromJson(json);
+      httpPollFailCount = 0;
+    } else {
+      httpPollFailCount++;
+      if (httpPollFailCount >= 5) {
+        rotConnected = false;
+        httpPollFailCount = 0;
+      }
+    }
+  } catch (Exception e) {
+    httpPollFailCount++;
+    if (httpPollFailCount >= 5) {
+      rotConnected = false;
+      httpPollFailCount = 0;
+    }
+  }
+}
+
+void parseRotatorStatusFromJson(JSONObject d) {
+  try {
+    float azi = d.getFloat("displayAzi", currentAzimuth);
+    currentAzimuth = smoothingFactor * azi + (1.0 - smoothingFactor) * currentAzimuth;
+    
+    rotatorCW  = d.getBoolean("cw");
+    rotatorCCW = d.getBoolean("ccw");
+    rotatorPowerOn = d.getBoolean("power");
+    brakeReleased  = d.getBoolean("brake");
+    goToActive     = d.getBoolean("goTo");
+    if (goToActive) goToTarget = d.getFloat("target", goToTarget);
+    
+    if (d.hasKey("smooth"))     smoothingFactor   = constrain(d.getFloat("smooth"),    0.01, 1.0);
+    if (d.hasKey("relayComp"))  relayCompensation = d.getFloat("relayComp");
+    if (d.hasKey("brakeDelay")) brakeDelayMs       = constrain(d.getInt("brakeDelay"), brakeDelayMin, brakeDelayMax);
+    
+    // Check GOTO completion
+    if (goToActive && targetAzimuth >= 0) {
+      float diff = abs(currentAzimuth - targetAzimuth);
+      if (diff > 180) diff = 360 - diff;
+      if (diff < 2.0) {
+        goToActive = false;
+        targetAzimuth = -1;
+        goToTarget = -1;
+        addDebugLog("GOTO: Target raggiunto!");
+        addNotification("Target raggiunto!", SUCCESS);
+      }
+    }
+  } catch (Exception e) {
+    addDebugLog("Errore parsing HTTP status: " + e.getMessage());
   }
 }
 
