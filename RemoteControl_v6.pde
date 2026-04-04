@@ -1332,7 +1332,7 @@ void handleSetConnClick() {
     // Connect button
     float btY = oy+180f-34f;
     if(over(ox+12f, btY, 110f, 24f)) {
-      if(b==0) { if(antConn) disconn("ANT"); else thread(b==0?"connAntThread":"connRotThread"); }
+      if(b==0) { if(antConn) disconn("ANT"); else thread("connAntThread"); }
       else     { if(rotConn) disconn("ROT"); else thread("connRotThread"); }
       return;
     }
@@ -1347,37 +1347,41 @@ void handleSetConnClick() {
 
 void handleSetSysClick() {
   float ox = 20f;
-  float baseY = 44f+40f+setScrollY;
-  // CARICA MAPPA
-  if(over(ox+12f, baseY+24f, 120f, 24f)) {
-    selectInput("Seleziona mappa azimutale (PNG/JPG):", "onMapFile");
-    return;
+  // y is the content start: topH(44) + tabBar(40) + setScrollY
+  float y0 = 44f + 40f + setScrollY;
+
+  // Section 1: MAPPA AZIMUTALE — cy = y0 + 22
+  float mapCy = y0 + 22f;
+  if(over(ox+12f, mapCy+24f, 120f, 24f)) {
+    selectInput("Seleziona mappa azimutale (PNG/JPG):", "onMapFile"); return;
   }
-  // RIMUOVI mappa
-  if(mapImg!=null && over(ox+140f, baseY+24f, 80f, 24f)) {
-    mapImg = null; mapPath = "";
-    N("Mappa rimossa", NTFY_WRN);
-    return;
+  if(mapImg!=null && over(ox+140f, mapCy+24f, 80f, 24f)) {
+    mapImg = null; mapPath = ""; N("Mappa rimossa", NTFY_WRN); return;
   }
-  // Exit mode radios
-  float ey = baseY + 120f + 52f + 52f + 52f + 8f + 28f + 8f;
-  for(int i=0;i<3;i++) {
-    if(over(ox+12f, ey+i*26f+5f, 180f, 18f)) {
-      exitMode = i; return;
-    }
+  // showGrid checkbox at mapCy+82 (left col)
+  if(over(ox+12f,  mapCy+82f, 14f, 14f)) { showGrid = !showGrid; return; }
+  // showCardinals at same Y, right col (ox+150)
+  if(over(ox+150f, mapCy+82f, 14f, 14f)) { showCardinals = !showCardinals; return; }
+  // showBeam at mapCy+102
+  if(over(ox+12f,  mapCy+102f, 14f, 14f)) { showBeam = !showBeam; return; }
+
+  // Section 3: BRAKE RELEASE — starts at y0+234, cy = y0+256
+  float brakeCy = y0 + 256f;
+  if(over(ox+12f, brakeCy+8f, 14f, 14f)) { hasBrake = !hasBrake; return; }
+
+  // Section 5: CHIUSURA APP — starts at y0+410, cy = y0+432
+  float exitCy = y0 + 432f;
+  for(int i=0; i<3; i++) {
+    if(over(ox+12f, exitCy+i*26f+7f, 200f, 16f)) { exitMode = i; return; }
   }
-  // Checkboxes
-  float[] cbY = {baseY+82f, baseY+102f, baseY+120f+28f+8f, baseY+120f+52f+8f+8f};
-  String[] cbK = {"showGrid","showCardinals","hasBrake","autoConn"};
-  for(int i=0;i<4;i++) {
-    if(over(ox+12f, cbY[i], 14f, 14f)) {
-      if(cbK[i].equals("showGrid"))      showGrid=!showGrid;
-      else if(cbK[i].equals("showCardinals")) showCardinals=!showCardinals;
-      else if(cbK[i].equals("hasBrake"))  hasBrake=!hasBrake;
-      else if(cbK[i].equals("autoConn"))  autoConn=!autoConn;
-      return;
-    }
+  if(exitMode==2) {
+    boolean ef3 = over(ox+220f, exitCy+2f+2*26f, 80f, 22f);
+    if(ef3 && !editF) { editF=true; editKey="fixedAz"; inBuf=nf(fixedAz,1,1); return; }
   }
+
+  // Section 6: CONNESSIONE AUTOMATICA — starts at y0+536, cy = y0+558
+  float autoCy = y0 + 558f;
+  if(over(ox+12f, autoCy+8f, 14f, 14f)) { autoConn = !autoConn; return; }
 }
 
 void handleDbgClick() {
@@ -1416,7 +1420,7 @@ void mouseWheel(MouseEvent e) {
 void keyPressed() {
   if(editF) {
     if(keyCode==BACKSPACE && inBuf.length()>0) inBuf=inBuf.substring(0,inBuf.length()-1);
-    else if(keyCode==ENTER) { commitEdit(); editF=false; }
+    else if(keyCode==ENTER) { try { commitEdit(); } catch(Exception e) { dlog("[ERR] commitEdit: "+e.getMessage()); } finally { editF=false; } }
     else if(keyCode==ESCAPE) { editF=false; }
     else if(key>=32 && key!=CODED) inBuf+=key;
   } else {
@@ -1669,7 +1673,7 @@ void onMapFile(File f) {
 void exit() {
   dlog("Uscita con exitMode="+exitMode);
   if(exitMode==EXIT_ALL_OFF) {
-    sendAnt("PWR:0");
+    for(int i=0; i<6; i++) sendAnt("ANT:"+(i+1)+":0");
     sendRot("CW:0"); sendRot("CCW:0"); sendRot("BRAKE:0:0");
   } else if(exitMode==EXIT_FIXED) {
     sendRot("GOTO:"+nf(fixedAz,1,1));
