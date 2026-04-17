@@ -161,6 +161,10 @@ class SettingsManager {
     
     config.setBoolean("autoConnect", false);
     config.setBoolean("debugMode", true);
+    config.setBoolean("showBrakeControls", true);
+    config.setBoolean("showMapImage", true);
+    config.setFloat("mapImageAlpha", 0.4);
+    config.setString("mapImagePath", "");
     saveSettings();
   }
   
@@ -188,6 +192,10 @@ class SettingsManager {
       
       autoConnect = config.getBoolean("autoConnect");
       debugMode = config.getBoolean("debugMode");
+      showBrakeControls = config.getBoolean("showBrakeControls", true);
+      showMapImage = config.getBoolean("showMapImage", true);
+      mapImageAlpha = config.getFloat("mapImageAlpha", 0.4);
+      mapImagePath = config.getString("mapImagePath", "");
     } catch (Exception e) { }
   }
   
@@ -217,6 +225,10 @@ class SettingsManager {
       
       config.setBoolean("autoConnect", autoConnect);
       config.setBoolean("debugMode", debugMode);
+      config.setBoolean("showBrakeControls", showBrakeControls);
+      config.setBoolean("showMapImage", showMapImage);
+      config.setFloat("mapImageAlpha", mapImageAlpha);
+      config.setString("mapImagePath", mapImagePath);
       saveJSONObject(config, settingsFile);
     } catch (Exception e) { }
   }
@@ -302,6 +314,23 @@ PFont fontRegular, fontBold, fontLarge, fontMono;
 ArrayList<String> debugLog = new ArrayList<String>();
 ArrayList<String> commandQueue = new ArrayList<String>();
 
+// ─── Mappa immagine quadrante bussola ───────────────────────────────────────
+PImage maskedMapImage = null;
+boolean showMapImage = true;
+float mapImageAlpha = 0.4;
+String mapImagePath = "";
+boolean mapAlphaSliderDragging = false;
+
+// ─── Toggle visibilità controllo freno ──────────────────────────────────────
+boolean showBrakeControls = true;
+
+// ─── Statistiche comunicazione HTTP ─────────────────────────────────────────
+int httpCommandCount = 0;
+int httpErrorCount = 0;
+
+// ─── Tempo rotazione ────────────────────────────────────────────────────────
+long rotationStartTime = 0;
+
 String[] tempAntennaNames = new String[6];
 int[] tempAntennaPins = new int[6];
 boolean[] tempAntennaDirective = new boolean[6];
@@ -338,6 +367,7 @@ void setup() {
   arrayCopy(antennaDirective, tempAntennaDirective);
   
   settings = new SettingsManager();
+  if (mapImagePath.length() > 0) loadMapImage(mapImagePath);
   scanSerialPorts();
   
   addDebugLog("═══════════════════════════════════════");
@@ -484,13 +514,21 @@ void drawControlScreen() {
 
 void drawAntennaPanel() {
   float px = 20, py = 55, pw = 290, ph = 420;
-  drawPanel(px, py, pw, ph, "ANTENNA SELECTOR", true);
+  drawPanel(px, py, pw, ph, "📡 ANTENNA SELECTOR", true);
   
-  fill(theme.textDim);
-  textFont(fontRegular);
-  textSize(10);
-  textAlign(LEFT, TOP);
-  text("Clicca per selezionare", px + 20, py + 45);
+  if (selectedAntenna < 0) {
+    fill(theme.textDim);
+    textFont(fontRegular);
+    textSize(10);
+    textAlign(LEFT, TOP);
+    text("Nessuna antenna attiva", px + 20, py + 45);
+  } else {
+    fill(theme.accent);
+    textFont(fontRegular);
+    textSize(10);
+    textAlign(LEFT, TOP);
+    text("Attiva: " + antennaNames[selectedAntenna], px + 20, py + 45);
+  }
   
   float startX = px + 15, startY = py + 70;
   float btnW = 125, btnH = 52, gapX = 10, gapY = 8;
@@ -543,6 +581,12 @@ void drawAntennaButton(int idx, float x, float y, float w, float h) {
     ellipse(ledX, ledY, 16, 16);
     fill(theme.success, 100);
     ellipse(ledX, ledY, 12, 12);
+    // Pulsing border for active antenna
+    float pulse = 0.5 + 0.5 * sin(millis() * 0.006);
+    noFill();
+    stroke(theme.success, 120 + 120 * pulse);
+    strokeWeight(2.5);
+    rect(x - 1, y - 1, w + 2, h + 2, 11);
   }
   fill(active ? theme.success : theme.disabled);
   ellipse(ledX, ledY, 8, 8);
@@ -578,13 +622,16 @@ void drawAntennaButton(int idx, float x, float y, float w, float h) {
 
 void drawRotatorPanel() {
   float px = 330, py = 55, pw = 450, ph = 420;
-  drawPanel(px, py, pw, ph, "ROTATOR CONTROL", true);
+  drawPanel(px, py, pw, ph, "🔄 ROTATOR CONTROL", true);
   
   mapCenterX = px + pw/2;
-  mapCenterY = py + 180;
+  mapCenterY = py + 185;
   
-  // NUOVO: Pulsante ON/OFF rotatore
+  // Pulsante ON/OFF rotatore
   drawRotatorPowerSwitch(px + 20, py + 45);
+  
+  // Display azimuth digitale grande (a destra del power switch)
+  drawLargeAzimuthDisplay(px + 280, py + 42, pw - 310);
   
   drawAzimuthMap();
   drawRotatorButtons();
@@ -628,9 +675,47 @@ void drawRotatorPowerSwitch(float x, float y) {
   text("Power (A3)", x + w + 10, y + h/2);
 }
 
+void drawLargeAzimuthDisplay(float x, float y, float w) {
+  float h = 36;
+  
+  fill(theme.primary);
+  stroke(rotatorPowerOn ? theme.rotatorPowerOn : theme.border);
+  strokeWeight(rotatorPowerOn ? 2 : 1);
+  rect(x, y, w, h, 6);
+  
+  // Azimuth valore grande
+  color aziColor = !rotatorPowerOn ? theme.disabled
+                 : overlapActive ? color(255, 140, 0) : theme.accent;
+  fill(aziColor);
+  textFont(fontLarge);
+  textSize(20);
+  textAlign(CENTER, CENTER);
+  String aziStr = nf(displayAzimuth, 1, 1) + "°";
+  if (overlapActive) aziStr += " (" + int(displayAzimuth % 360) + "°)";
+  text(aziStr, x + w/2, y + h/2 - 4);
+  
+  // Stato sotto il numero
+  fill(theme.textDim);
+  textFont(fontRegular);
+  textSize(8);
+  if (rotatorCW || rotatorCCW) {
+    long elapsed = (millis() - rotationStartTime) / 1000;
+    fill(rotatorCW ? theme.cwColor : theme.ccwColor);
+    text((rotatorCW ? "→ CW" : "← CCW") + "  " + elapsed + "s", x + w/2, y + h - 5);
+  }
+}
+
 void drawAzimuthMap() {
   pushMatrix();
   translate(mapCenterX, mapCenterY);
+  
+  // ─── Mappa immagine con maschera circolare ──────────────────────────────
+  if (showMapImage && maskedMapImage != null) {
+    tint(255, mapImageAlpha * 255);
+    imageMode(CENTER);
+    image(maskedMapImage, 0, 0);
+    noTint();
+  }
   
   noFill();
   for (int i = 3; i >= 1; i--) {
@@ -667,11 +752,22 @@ void drawAzimuthMap() {
     float midAngle = (overlapStart + overlapEnd) / 2;
     fill(255, 140, 0, 200);
     textFont(fontRegular);
-    textSize(8);
+    textSize(9);
     textAlign(CENTER, CENTER);
     text("OVERLAP", cos(midAngle) * (mapRadius * 0.55), sin(midAngle) * (mapRadius * 0.55));
   }
   
+  // Tacche minori ogni 10°
+  for (int deg = 0; deg < 360; deg += 10) {
+    if (deg % 30 == 0) continue;
+    float angle = radians(deg - 90);
+    stroke(theme.border, 70);
+    strokeWeight(0.8);
+    float innerR = mapRadius - 5;
+    line(cos(angle) * innerR, sin(angle) * innerR, cos(angle) * mapRadius, sin(angle) * mapRadius);
+  }
+  
+  // Tacche maggiori ogni 30°
   for (int deg = 0; deg < 360; deg += 30) {
     float angle = radians(deg - 90);
     float innerR = (deg % 90 == 0) ? mapRadius - 15 : mapRadius - 10;
@@ -679,13 +775,11 @@ void drawAzimuthMap() {
     strokeWeight(deg % 90 == 0 ? 2 : 1);
     line(cos(angle) * innerR, sin(angle) * innerR, cos(angle) * mapRadius, sin(angle) * mapRadius);
     
-    if (deg % 30 == 0) {
-      fill(theme.textDim);
-      textFont(fontRegular);
-      textSize(deg % 90 == 0 ? 10 : 8);
-      textAlign(CENTER, CENTER);
-      text(deg + "°", cos(angle) * (mapRadius + 18), sin(angle) * (mapRadius + 18));
-    }
+    fill(theme.textDim);
+    textFont(fontRegular);
+    textSize(deg % 90 == 0 ? 10 : 9);
+    textAlign(CENTER, CENTER);
+    text(deg + "°", cos(angle) * (mapRadius + 18), sin(angle) * (mapRadius + 18));
   }
   
   String[] cardinals = {"N", "E", "S", "W"};
@@ -737,19 +831,31 @@ void drawAzimuthMap() {
   }
   
   float needleAngle = radians(displayAzimuth - 90);
+  color needleColor = overlapActive ? color(255, 100, 0) : theme.accent;
+  
+  // Glow pronunciato quando in rotazione
+  if (rotatorCW || rotatorCCW) {
+    float glowPulse = 0.5 + 0.5 * sin(millis() * 0.008);
+    stroke(red(needleColor), green(needleColor), blue(needleColor), 40 + 60 * glowPulse);
+    strokeWeight(14);
+    line(0, 0, cos(needleAngle) * (mapRadius - 15), sin(needleAngle) * (mapRadius - 15));
+    stroke(red(needleColor), green(needleColor), blue(needleColor), 80 + 80 * glowPulse);
+    strokeWeight(8);
+    line(0, 0, cos(needleAngle) * (mapRadius - 15), sin(needleAngle) * (mapRadius - 15));
+  }
   
   stroke(0, 0, 0, 80);
   strokeWeight(4);
   line(2, 2, cos(needleAngle) * (mapRadius - 15) + 2, sin(needleAngle) * (mapRadius - 15) + 2);
   
-  stroke(overlapActive ? color(255, 100, 0) : theme.accent);
+  stroke(needleColor);
   strokeWeight(3);
   line(0, 0, cos(needleAngle) * (mapRadius - 15), sin(needleAngle) * (mapRadius - 15));
   
   pushMatrix();
   translate(cos(needleAngle) * (mapRadius - 15), sin(needleAngle) * (mapRadius - 15));
   rotate(needleAngle + HALF_PI);
-  fill(overlapActive ? color(255, 100, 0) : theme.accent);
+  fill(needleColor);
   noStroke();
   triangle(-5, -10, 5, -10, 0, 0);
   popMatrix();
@@ -772,34 +878,34 @@ void drawAzimuthMap() {
     ellipse(0, 0, 75, 75);
   }
   
-  fill(systemOn && rotatorPowerOn ? theme.accent : theme.disabled);
+  fill(systemOn && rotatorPowerOn ? (overlapActive ? color(255, 140, 0) : theme.accent) : theme.disabled);
   textFont(fontBold);
   textSize(16);
   textAlign(CENTER, CENTER);
-  text(int(displayAzimuth) + "°", 0, -5);
+  text(nf(displayAzimuth, 1, 1) + "\u00b0", 0, -5);
   
   fill(theme.textDim);
   textSize(9);
   String status = "STOP";
   if (!rotatorPowerOn) status = "OFF";
-  else if (goToActive) status = "→ GOTO " + nf(goToTarget, 1, 0) + "°";
-  else if (rotatorCW) status = "→ CW";
-  else if (rotatorCCW) status = "← CCW";
+  else if (goToActive) status = "\u2192 GOTO " + nf(goToTarget, 1, 0) + "\u00b0";
+  else if (rotatorCW) status = "\u2192 CW";
+  else if (rotatorCCW) status = "\u2190 CCW";
   text(status, 0, 12);
   
   // Display target azimuth if Go To is active
   if (targetAzimuth >= 0) {
     fill(theme.warning);
-    textSize(8);
-    text("TARGET: " + nf(targetAzimuth, 1, 1) + "°", 0, 22);
+    textSize(9);
+    text("TARGET: " + nf(targetAzimuth, 1, 1) + "\u00b0", 0, 24);
   }
   
   // Indicatore OVERLAP nel centro del quadrante
   if (overlapActive) {
     fill(255, 140, 0);
-    textSize(8);
+    textSize(9);
     textFont(fontBold);
-    text("OVERLAP", 0, targetAzimuth >= 0 ? 32 : 22);
+    text("\u26a0 OVERLAP", 0, targetAzimuth >= 0 ? 36 : 24);
   }
   
   popMatrix();
@@ -808,27 +914,48 @@ void drawAzimuthMap() {
 void drawRotatorButtons() {
   float centerX = mapCenterX;
   float btnY = mapCenterY + 155;
-  float btnW = 60, btnH = 38, gap = 8;
+  float btnH = 38, gap = 8;
   
-  // Disabilita pulsanti se rotatore è OFF
   boolean rotatorEnabled = systemOn && rotatorPowerOn;
   
-  // 4 buttons: CCW | HALT | BRAKE | CW
-  float totalWidth = btnW * 4 + gap * 3;
-  float startX = centerX - totalWidth / 2;
-  
-  drawMomentaryButton("◄ CCW", startX, btnY, btnW, btnH, 20, ccwButtonPressed, theme.ccwColor, rotatorEnabled);
-  drawHaltButton("HALT", startX + btnW + gap, btnY, btnW, btnH, 23, rotatorEnabled);
-  drawBrakeButton("BRAKE", startX + (btnW + gap) * 2, btnY, btnW, btnH, 21, rotatorEnabled);
-  drawMomentaryButton("CW ►", startX + (btnW + gap) * 3, btnY, btnW, btnH, 22, cwButtonPressed, theme.cwColor, rotatorEnabled);
-  
-  // Draw HALT GOTO button if goto is active
-  if (goToActive) {
-    drawHaltGotoButton(centerX, btnY + btnH + 15, btnW * 2 + gap, btnH);
+  if (showBrakeControls) {
+    // Layout 4 pulsanti: CCW | HALT | FRENO | CW
+    float btnW = 60;
+    float totalWidth = btnW * 4 + gap * 3;
+    float startX = centerX - totalWidth / 2;
+    
+    drawMomentaryButton("◄ CCW", startX, btnY, btnW, btnH, 20, ccwButtonPressed, theme.ccwColor, rotatorEnabled);
+    drawHaltButton("HALT", startX + btnW + gap, btnY, btnW, btnH, 23, rotatorEnabled);
+    drawBrakeButton("FRENO", startX + (btnW + gap) * 2, btnY, btnW, btnH, 21, rotatorEnabled);
+    drawMomentaryButton("CW ►", startX + (btnW + gap) * 3, btnY, btnW, btnH, 22, cwButtonPressed, theme.cwColor, rotatorEnabled);
+    
+    if (goToActive) {
+      drawHaltGotoButton(centerX, btnY + btnH + 15, btnW * 2 + gap, btnH);
+    }
+    drawBrakeDelaySlider(centerX, btnY + btnH + (goToActive ? 70 : 55));
+    
+  } else {
+    // Layout 3 pulsanti senza freno: CCW | HALT | CW (stessa larghezza totale del layout a 4 per coerenza visiva)
+    float totalWidth = 60.0 * 4 + gap * 3; // larghezza totale invariata = 264px
+    float btnW = (totalWidth - gap * 2) / 3;
+    float startX = centerX - totalWidth / 2;
+    
+    drawMomentaryButton("◄ CCW", startX, btnY, btnW, btnH, 20, ccwButtonPressed, theme.ccwColor, rotatorEnabled);
+    drawHaltButton("HALT", startX + btnW + gap, btnY, btnW, btnH, 23, rotatorEnabled);
+    drawMomentaryButton("CW ►", startX + (btnW + gap) * 2, btnY, btnW, btnH, 22, cwButtonPressed, theme.cwColor, rotatorEnabled);
+    
+    if (goToActive) {
+      drawHaltGotoButton(centerX, btnY + btnH + 15, totalWidth / 2, btnH);
+    }
+    
+    // Solo smooth e relay comp (senza brake delay)
+    fill(theme.textDim);
+    textFont(fontRegular);
+    textSize(9);
+    textAlign(CENTER, TOP);
+    text("Smooth: " + nf(smoothingFactor, 1, 2) + "  |  RelayComp: " + nf(relayCompensation, 1, 1) + "\u00b0",
+         centerX, btnY + btnH + (goToActive ? 70 : 15));
   }
-  
-  // Draw brake delay slider
-  drawBrakeDelaySlider(centerX, btnY + btnH + (goToActive ? 70 : 55));
 }
 
 void drawMomentaryButton(String label, float x, float y, float w, float h, int idx, boolean pressed, color activeColor, boolean enabled) {
@@ -1182,28 +1309,71 @@ void drawStatusBar() {
   rect(px, py, pw, ph, 8);
   
   float iconY = py + ph/2;
-  float startX = px + 20;
-  float spacing = 115;
+  float startX = px + 15;
+  float spacing = 100;
   
-  drawStatusItem(startX, iconY, "ANT", antConnected ? "OK" : "DISC", antConnected ? theme.success : theme.error);
-  drawStatusItem(startX + spacing, iconY, "ROT", rotConnected ? "OK" : "DISC", rotConnected ? theme.success : theme.error);
-  drawStatusItem(startX + spacing * 2, iconY, "Sistema", systemOn ? "ON" : "OFF", systemOn ? theme.success : theme.warning);
+  // ANT status
+  String antStatus = antConnected ? (antConnMode == 1 ? "WiFi" : "USB") : "DISC";
+  drawStatusItem(startX, iconY, "📡 ANT", antStatus, antConnected ? theme.success : theme.error);
   
+  // ROT status (con IP se WiFi)
+  String rotStatus = rotConnected ? (rotConnMode == 1 ? rotWifiIP : "USB") : "DISC";
+  drawStatusItem(startX + spacing, iconY, "⚙ ROT", rotStatus, rotConnected ? theme.success : theme.error);
+  
+  // Sistema
+  drawStatusItem(startX + spacing * 2, iconY, "⚡ Sist", systemOn ? "ON" : "OFF", systemOn ? theme.success : theme.warning);
+  
+  // Direzione
   String rotatorSt = "STOP";
   color rotatorCol = theme.disabled;
-  if (rotatorCW) { rotatorSt = "CW"; rotatorCol = theme.cwColor; }
-  else if (rotatorCCW) { rotatorSt = "CCW"; rotatorCol = theme.ccwColor; }
+  if (rotatorCW)  { rotatorSt = "→CW";  rotatorCol = theme.cwColor; }
+  else if (rotatorCCW) { rotatorSt = "←CCW"; rotatorCol = theme.ccwColor; }
   drawStatusItem(startX + spacing * 3, iconY, "Dir", rotatorSt, rotatorCol);
   
-  String antSt = selectedAntenna >= 0 ?  "ANT" + (selectedAntenna + 1) : "NONE";
-  drawStatusItem(startX + spacing * 4, iconY, "Ant", antSt, selectedAntenna >= 0 ?  theme.accent : theme.disabled);
+  // Antenna
+  String antSt = selectedAntenna >= 0 ? "ANT" + (selectedAntenna + 1) : "NESSUNA";
+  drawStatusItem(startX + spacing * 4, iconY, "Ant", antSt, selectedAntenna >= 0 ? theme.accent : theme.disabled);
   
-  fill(theme.text);
+  // OVERLAP (solo se attivo)
+  if (overlapActive) {
+    float ovX = startX + spacing * 5;
+    fill(color(255, 120, 0));
+    noStroke();
+    ellipse(ovX, iconY, 10, 10);
+    fill(color(255, 120, 0), 50);
+    ellipse(ovX, iconY, 16, 16);
+    fill(color(255, 120, 0));
+    textFont(fontBold);
+    textSize(9);
+    textAlign(LEFT, CENTER);
+    text("OVERLAP", ovX + 8, iconY);
+  }
+  
+  // FRENO (solo se visibile)
+  if (showBrakeControls) {
+    float brX = startX + spacing * 5 + (overlapActive ? 70 : 0);
+    color brakeCol = brakeReleased ? theme.warning : theme.textDim;
+    fill(brakeCol);
+    noStroke();
+    ellipse(brX, iconY, 8, 8);
+    fill(brakeCol);
+    textFont(fontRegular);
+    textSize(9);
+    textAlign(LEFT, CENTER);
+    text("BRK:" + (brakeReleased ? "LIB" : "ON"), brX + 7, iconY);
+  }
+  
+  // Azimuth con decimale
+  float azX = px + pw - 155;
+  String azStr = "AZ: " + nf(displayAzimuth, 1, 1) + "\u00b0";
+  if (overlapActive) azStr += " (=" + int(displayAzimuth % 360) + "\u00b0)";
+  fill(overlapActive ? color(255, 140, 0) : theme.text);
   textFont(fontBold);
   textSize(11);
   textAlign(LEFT, CENTER);
-  text("AZ:" + int(displayAzimuth) + "°", startX + spacing * 5, iconY);
+  text(azStr, azX, iconY);
   
+  // Timestamp
   fill(theme.textDim);
   textFont(fontRegular);
   textSize(10);
@@ -1231,7 +1401,7 @@ void drawStatusItem(float x, float y, String label, String value, color c) {
 
 void drawSettingsScreen() {
   float px = 40, py = 60, pw = 720, ph = 400;
-  drawPanel(px, py, pw, ph, "IMPOSTAZIONI", false);
+  drawPanel(px, py, pw, ph, "⚙ IMPOSTAZIONI", false);
   drawSettingsTabs(px + 20, py + 45);
   
   switch(currentSettingsTab) {
@@ -1640,7 +1810,77 @@ void drawSystemSettings(float px, float py) {
   textAlign(LEFT, CENTER);
   text(nf(relayCompensation, 1, 1) + "\u00b0", rcSliderX + sliderW + 10, rcY + 2);
   
-  float btnY = py + 170;
+  // ─── Controlli freno ────────────────────────────────────────────────────
+  float brakeCheckY = rcY + 38;
+  drawCheckbox(px + 30, brakeCheckY, showBrakeControls, 101);
+  fill(theme.text);
+  textFont(fontRegular);
+  textSize(11);
+  textAlign(LEFT, CENTER);
+  text("Mostra controllo Freno", px + 55, brakeCheckY + 9);
+  
+  // ─── Controlli mappa ────────────────────────────────────────────────────
+  float mapCheckY = brakeCheckY + 28;
+  drawCheckbox(px + 30, mapCheckY, showMapImage, 102);
+  fill(theme.text);
+  textFont(fontRegular);
+  textSize(11);
+  textAlign(LEFT, CENTER);
+  text("Mostra mappa nel quadrante", px + 55, mapCheckY + 9);
+  
+  // Pulsante Carica Mappa
+  float mapBtnX = px + 310, mapBtnY = mapCheckY;
+  boolean mapBtnHover = mouseX > mapBtnX && mouseX < mapBtnX + 110 && mouseY > mapBtnY && mouseY < mapBtnY + 22;
+  fill(mapBtnHover ? lerpColor(theme.accent, theme.text, 0.2) : theme.accent);
+  stroke(theme.accent);
+  rect(mapBtnX, mapBtnY, 110, 22, 6);
+  fill(theme.primary);
+  textFont(fontBold);
+  textSize(9);
+  textAlign(CENTER, CENTER);
+  text("Carica Mappa...", mapBtnX + 55, mapBtnY + 11);
+  
+  // Slider trasparenza mappa
+  float maY = mapCheckY + 32;
+  float maSliderX = px + 130;
+  float maSliderW = 220, maSliderH = 4, maKnobSize = 14;
+  
+  fill(showMapImage ? theme.textDim : color(theme.textDim, 80));
+  textFont(fontRegular);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text("Trasparenza mappa:", px + 30, maY + 2);
+  
+  fill(theme.secondary);
+  stroke(theme.border);
+  strokeWeight(1);
+  rect(maSliderX, maY - 2, maSliderW, maSliderH, 2);
+  
+  float maKnobX = map(mapImageAlpha, 0.0, 1.0, maSliderX, maSliderX + maSliderW);
+  boolean maHover = dist(mouseX, mouseY, maKnobX, maY - 2 + maSliderH/2) < maKnobSize;
+  if ((maHover || mapAlphaSliderDragging) && showMapImage) { fill(theme.accent, 60); noStroke(); ellipse(maKnobX, maY - 2 + maSliderH/2, maKnobSize + 8, maKnobSize + 8); }
+  fill(mapAlphaSliderDragging ? theme.accent : (showMapImage ? theme.text : theme.textDim));
+  stroke(showMapImage ? theme.accent : theme.border);
+  strokeWeight(2);
+  ellipse(maKnobX, maY - 2 + maSliderH/2, maKnobSize, maKnobSize);
+  fill(showMapImage ? theme.text : theme.textDim);
+  textFont(fontBold);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text(int(mapImageAlpha * 100) + "%", maSliderX + maSliderW + 10, maY + 2);
+  
+  // Percorso mappa attuale
+  if (mapImagePath.length() > 0) {
+    String shortPath = mapImagePath.length() > 40 ? "..." + mapImagePath.substring(mapImagePath.length() - 37) : mapImagePath;
+    fill(maskedMapImage != null ? theme.success : theme.error);
+    textFont(fontRegular);
+    textSize(9);
+    textAlign(LEFT, CENTER);
+    text((maskedMapImage != null ? "✓ " : "✗ ") + shortPath, px + 30, maY + 20);
+  }
+  
+  // ─── Reset e versione ───────────────────────────────────────────────────
+  float btnY = py + 245;
   boolean resetHover = mouseX > px + 30 && mouseX < px + 150 && mouseY > btnY && mouseY < btnY + 35;
   
   fill(resetHover ? lerpColor(theme.warning, theme.text, 0.2) : theme.warning);
@@ -1655,12 +1895,9 @@ void drawSystemSettings(float px, float py) {
   
   fill(theme.textDim);
   textFont(fontRegular);
-  textSize(10);
+  textSize(9);
   textAlign(LEFT, TOP);
-  text("Versione: " + APP_VERSION, px + 30, btnY + 55);
-  text("Relè antenne: Pin 4-9", px + 30, btnY + 70);
-  text("Relè rotatore: CW=Pin 3, CCW=Pin 4, BRK=Pin 5, PWR=Pin 7", px + 30, btnY + 85);
-  text("LED: CW=Pin16, CCW=Pin10 (40% PWM)", px + 30, btnY + 100);
+  text("v" + APP_VERSION + "  |  TX HTTP: " + httpCommandCount + "  |  Errori: " + httpErrorCount, px + 30, btnY + 45);
 }
 
 void drawSettingsButtons(float px, float py) {
@@ -1693,17 +1930,30 @@ void drawSettingsButtons(float px, float py) {
 
 void drawDebugScreen() {
   float px = 40, py = 60, pw = 720, ph = 400;
-  drawPanel(px, py, pw, ph, "DEBUG CONSOLE", false);
+  drawPanel(px, py, pw, ph, "⚙ DEBUG CONSOLE", false);
+  
+  // Stats bar
+  fill(theme.secondary);
+  noStroke();
+  rect(px + 15, py + 42, pw - 30, 18, 3);
+  fill(theme.textDim);
+  textFont(fontRegular);
+  textSize(9);
+  textAlign(LEFT, CENTER);
+  text("HTTP TX: " + httpCommandCount + "  |  Errori: " + httpErrorCount +
+       "  |  Linee log: " + debugLog.size() +
+       (rotConnected && rotConnMode == 1 ? "  |  Connesso: " + rotWifiIP : ""),
+       px + 25, py + 51);
   
   fill(theme.primary);
   noStroke();
-  rect(px + 15, py + 50, pw - 30, ph - 100, 6);
+  rect(px + 15, py + 62, pw - 30, ph - 112, 6);
   
   textFont(fontMono);
   textSize(10);
   textAlign(LEFT, TOP);
   
-  int maxLines = (int)((ph - 120) / 14);
+  int maxLines = (int)((ph - 132) / 14);
   int startIdx = max(0, debugLog.size() - maxLines);
   
   for (int i = startIdx; i < debugLog.size(); i++) {
@@ -1712,9 +1962,10 @@ void drawDebugScreen() {
     if (line.contains("ERRORE") || line.contains("ERROR")) lineColor = theme.error;
     else if (line.contains("WARNING") || line.contains("HALT")) lineColor = theme.warning;
     else if (line.contains("TX:") || line.contains("RX:")) lineColor = theme.accent;
+    else if (line.contains("OVERLAP")) lineColor = color(255, 140, 0);
     
     fill(lineColor);
-    text(line, px + 25, py + 60 + (i - startIdx) * 14);
+    text(line, px + 25, py + 72 + (i - startIdx) * 14);
   }
   
   float btnX = px + pw - 90, btnY = py + ph - 40;
@@ -1795,16 +2046,16 @@ void drawTopBar() {
   textFont(fontRegular);
   textSize(10);
   textAlign(LEFT, CENTER);
-  text("ANT", ledX + 12, 22);
+  text("ANT: " + (antConnected ? "Connesso" : "Disc."), ledX + 12, 22);
   
   // ROT LED
-  float ledX2 = ledX + 70;
+  float ledX2 = ledX + 100;
   fill(rotConnected ? lerpColor(theme.success, color(255), pulse * 0.3) : theme.error);
   noStroke();
   ellipse(ledX2, 22, 10, 10);
   
   fill(theme.text);
-  text("ROT", ledX2 + 12, 22);
+  text("ROT: " + (rotConnected ? "Connesso" : "Disc."), ledX2 + 12, 22);
   
   drawPowerSwitch(width - 75, 12);
 }
@@ -1844,7 +2095,7 @@ void drawPowerSwitch(float x, float y) {
 }
 
 void drawNavigationBar() {
-  String[] items = {"CONTROLLO", "IMPOSTAZIONI", "DEBUG"};
+  String[] items = {"⚡ CONTROLLO", "⚙ IMPOSTAZIONI", "DEBUG"};
   float barW = 320, barH = 40;
   float startX = (width - barW) / 2;
   float startY = height - 48;
@@ -1929,11 +2180,15 @@ void mouseReleased() {
   brakeSliderDragging = false;
   smoothSliderDragging = false;
   relayCompSliderDragging = false;
+  if (mapAlphaSliderDragging) {
+    settings.saveSettings();
+  }
+  mapAlphaSliderDragging = false;
 }
 
 void mouseDragged() {
   // Handle sliders in rotator panel (screen 0)
-  if (currentScreen == 0) {
+  if (currentScreen == 0 && showBrakeControls) {
     float centerX = mapCenterX;
     float btnY = mapCenterY + 155;
     float btnH = 38;
@@ -1967,7 +2222,7 @@ void mouseDragged() {
     
     // Smooth factor knob
     float sfKnobX = map(smoothingFactor, 0.01, 1.0, sfSliderX, sfSliderX + sliderW);
-    if (!smoothSliderDragging && !relayCompSliderDragging &&
+    if (!smoothSliderDragging && !relayCompSliderDragging && !mapAlphaSliderDragging &&
         dist(mouseX, mouseY, sfKnobX, sfY - 2 + sliderH/2) < knobSize) {
       smoothSliderDragging = true;
     }
@@ -1979,13 +2234,30 @@ void mouseDragged() {
     
     // Relay comp knob
     float rcKnobX = map(relayCompensation, 0, 30, rcSliderX, rcSliderX + sliderW);
-    if (!smoothSliderDragging && !relayCompSliderDragging &&
+    if (!smoothSliderDragging && !relayCompSliderDragging && !mapAlphaSliderDragging &&
         dist(mouseX, mouseY, rcKnobX, rcY - 2 + sliderH/2) < knobSize) {
       relayCompSliderDragging = true;
     }
     if (relayCompSliderDragging) {
       relayCompensation = map(constrain(mouseX, rcSliderX, rcSliderX + sliderW), rcSliderX, rcSliderX + sliderW, 0.0, 30.0);
       relayCompensation = constrain(relayCompensation, 0.0, 30.0);
+      return;
+    }
+    
+    // Map alpha slider
+    float maSliderX = px + 130;
+    float brakeCheckY = rcY + 38;
+    float mapCheckY = brakeCheckY + 28;
+    float maY = mapCheckY + 32;
+    float maSliderW = 220;
+    float maKnobX = map(mapImageAlpha, 0.0, 1.0, maSliderX, maSliderX + maSliderW);
+    if (!smoothSliderDragging && !relayCompSliderDragging && !mapAlphaSliderDragging &&
+        showMapImage && dist(mouseX, mouseY, maKnobX, maY - 2 + sliderH/2) < knobSize) {
+      mapAlphaSliderDragging = true;
+    }
+    if (mapAlphaSliderDragging) {
+      mapImageAlpha = map(constrain(mouseX, maSliderX, maSliderX + maSliderW), maSliderX, maSliderX + maSliderW, 0.0, 1.0);
+      mapImageAlpha = constrain(mapImageAlpha, 0.0, 1.0);
       return;
     }
   }
@@ -2057,6 +2329,7 @@ void activateCWRelay() {
     
     cwButtonPressed = true;
     rotatorCW = true;
+    rotationStartTime = millis();
     addDebugLog("CW: Premuto → Relè A0 ON");
     sendRotatorCommand("CW:1");
   }
@@ -2079,6 +2352,7 @@ void activateCCWRelay() {
     
     ccwButtonPressed = true;
     rotatorCCW = true;
+    rotationStartTime = millis();
     addDebugLog("CCW: Premuto → Relè A1 ON");
     sendRotatorCommand("CCW:1");
   }
@@ -2089,50 +2363,74 @@ void checkRotatorButtonsPressed() {
   
   float centerX = mapCenterX;
   float btnY = mapCenterY + 155;
-  float btnW = 60, btnH = 38, gap = 8;
+  float btnH = 38, gap = 8;
   
-  float totalWidth = btnW * 4 + gap * 3;
-  float startX = centerX - totalWidth / 2;
-  
-  // CCW
-  if (mouseX > startX && mouseX < startX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
-    activateCCWRelay();
-    return;
-  }
-  
-  // HALT
-  float haltX = startX + btnW + gap;
-  if (mouseX > haltX && mouseX < haltX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
-    emergencyHalt();
-    return;
-  }
-  
-  // BRAKE (momentary)
-  float brakeX = startX + (btnW + gap) * 2;
-  if (mouseX > brakeX && mouseX < brakeX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
-    activateBrake();
-    return;
-  }
-  
-  // CW
-  float cwX = startX + (btnW + gap) * 3;
-  if (mouseX > cwX && mouseX < cwX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
-    activateCWRelay();
-    return;
-  }
-  
-  // HALT GOTO button
-  if (goToActive) {
-    float haltGotoW = btnW * 2 + gap;
-    float haltGotoX = centerX - haltGotoW / 2;
-    float haltGotoY = btnY + btnH + 15;
-    if (mouseX > haltGotoX && mouseX < haltGotoX + haltGotoW && mouseY > haltGotoY && mouseY < haltGotoY + btnH) {
-      goToActive = false;
-      goToTarget = -1;
-      sendRotatorCommand("GOTO:HALT");
-      deactivateRotatorRelays();
-      addNotification("GOTO aborted", WARNING);
-      return;
+  if (showBrakeControls) {
+    float btnW = 60;
+    float totalWidth = btnW * 4 + gap * 3;
+    float startX = centerX - totalWidth / 2;
+    
+    // CCW
+    if (mouseX > startX && mouseX < startX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
+      activateCCWRelay(); return;
+    }
+    // HALT
+    float haltX = startX + btnW + gap;
+    if (mouseX > haltX && mouseX < haltX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
+      emergencyHalt(); return;
+    }
+    // FRENO
+    float brakeX = startX + (btnW + gap) * 2;
+    if (mouseX > brakeX && mouseX < brakeX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
+      activateBrake(); return;
+    }
+    // CW
+    float cwX = startX + (btnW + gap) * 3;
+    if (mouseX > cwX && mouseX < cwX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
+      activateCWRelay(); return;
+    }
+    // HALT GOTO
+    if (goToActive) {
+      float haltGotoW = btnW * 2 + gap;
+      float haltGotoX = centerX - haltGotoW / 2;
+      float haltGotoY = btnY + btnH + 15;
+      if (mouseX > haltGotoX && mouseX < haltGotoX + haltGotoW && mouseY > haltGotoY && mouseY < haltGotoY + btnH) {
+        goToActive = false; goToTarget = -1;
+        sendRotatorCommand("GOTO:HALT"); deactivateRotatorRelays();
+        addNotification("GOTO annullato", WARNING); return;
+      }
+    }
+    
+  } else {
+    // Layout 3 pulsanti senza freno
+    float totalWidth = 60.0 * 4 + gap * 3;
+    float btnW = (totalWidth - gap * 2) / 3;
+    float startX = centerX - totalWidth / 2;
+    
+    // CCW
+    if (mouseX > startX && mouseX < startX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
+      activateCCWRelay(); return;
+    }
+    // HALT
+    float haltX = startX + btnW + gap;
+    if (mouseX > haltX && mouseX < haltX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
+      emergencyHalt(); return;
+    }
+    // CW
+    float cwX = startX + (btnW + gap) * 2;
+    if (mouseX > cwX && mouseX < cwX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
+      activateCWRelay(); return;
+    }
+    // HALT GOTO
+    if (goToActive) {
+      float haltGotoW = totalWidth / 2;
+      float haltGotoX = centerX - haltGotoW / 2;
+      float haltGotoY = btnY + btnH + 15;
+      if (mouseX > haltGotoX && mouseX < haltGotoX + haltGotoW && mouseY > haltGotoY && mouseY < haltGotoY + btnH) {
+        goToActive = false; goToTarget = -1;
+        sendRotatorCommand("GOTO:HALT"); deactivateRotatorRelays();
+        addNotification("GOTO annullato", WARNING); return;
+      }
     }
   }
 }
@@ -2456,13 +2754,45 @@ void checkConnectionSettingsClick(float px, float py) {
 }
 
 void checkSystemSettingsClick(float px, float py) {
+  // Debug checkbox
   if (mouseX > px + 30 && mouseX < px + 48 && mouseY > py + 40 && mouseY < py + 58) {
     debugMode = !debugMode;
     addDebugLog("Debug: " + (debugMode ? "ON" : "OFF"));
     return;
   }
   
-  float btnY = py + 170;
+  // Calcola posizioni come in drawSystemSettings
+  float sfY = py + 85;
+  float rcY = sfY + 38;
+  float brakeCheckY = rcY + 38;
+  float mapCheckY = brakeCheckY + 28;
+  
+  // Mostra controllo Freno checkbox
+  if (mouseX > px + 30 && mouseX < px + 48 && mouseY > brakeCheckY && mouseY < brakeCheckY + 18) {
+    showBrakeControls = !showBrakeControls;
+    addDebugLog("Controllo Freno: " + (showBrakeControls ? "ON" : "OFF"));
+    settings.saveSettings();
+    addNotification("Freno " + (showBrakeControls ? "visibile" : "nascosto"), showBrakeControls ? SUCCESS : INFO);
+    return;
+  }
+  
+  // Mostra mappa checkbox
+  if (mouseX > px + 30 && mouseX < px + 48 && mouseY > mapCheckY && mouseY < mapCheckY + 18) {
+    showMapImage = !showMapImage;
+    addDebugLog("Mappa nel quadrante: " + (showMapImage ? "ON" : "OFF"));
+    settings.saveSettings();
+    return;
+  }
+  
+  // Carica Mappa button
+  float mapBtnX = px + 310, mapBtnY = mapCheckY;
+  if (mouseX > mapBtnX && mouseX < mapBtnX + 110 && mouseY > mapBtnY && mouseY < mapBtnY + 22) {
+    selectInput("Seleziona immagine mappa", "mapImageSelected");
+    return;
+  }
+  
+  // Reset button
+  float btnY = py + 245;
   if (mouseX > px + 30 && mouseX < px + 150 && mouseY > btnY && mouseY < btnY + 35) {
     resetToDefaults();
     addNotification("Reset completato", WARNING);
@@ -2849,11 +3179,13 @@ void sendHttpCommandThread() {
     String url = "http://" + rotWifiIP + ":" + rotWifiPort + "/command?cmd=" + encodedCmd;
     String[] response = loadStrings(url);
     if (response != null && response.length > 0) {
+      httpCommandCount++;
       addDebugLog("TX ROT HTTP OK: " + cmd);
     } else {
       addDebugLog("TX ROT HTTP: nessuna risposta per " + cmd);
     }
   } catch (Exception e) {
+    httpErrorCount++;
     addDebugLog("ERRORE TX ROT HTTP: " + e.getMessage());
     httpPollFailCount++;
     if (httpPollFailCount >= 10) {
@@ -3021,6 +3353,48 @@ void parseRotatorStatusFromJson(JSONObject d) {
     }
   } catch (Exception e) {
     addDebugLog("Errore parsing HTTP status: " + e.getMessage());
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  MAPPA IMMAGINE NEL QUADRANTE
+// ═══════════════════════════════════════════════════════════════════════════
+
+void loadMapImage(String path) {
+  try {
+    PImage img = loadImage(path);
+    if (img == null || img.width <= 0 || img.height <= 0) {
+      addDebugLog("Errore caricamento mappa: " + path);
+      addNotification("Errore caricamento mappa", ERROR);
+      return;
+    }
+    int size = int(mapRadius * 2);
+    img.resize(size, size);
+    
+    // Crea maschera circolare
+    PGraphics maskGraphics = createGraphics(size, size);
+    maskGraphics.beginDraw();
+    maskGraphics.background(0);
+    maskGraphics.fill(255);
+    maskGraphics.noStroke();
+    maskGraphics.ellipse(size / 2.0, size / 2.0, size, size);
+    maskGraphics.endDraw();
+    img.mask(maskGraphics);
+    
+    maskedMapImage = img;
+    mapImagePath = path;
+    settings.saveSettings();
+    addDebugLog("Mappa caricata: " + path);
+    addNotification("Mappa caricata", SUCCESS);
+  } catch (Exception e) {
+    addDebugLog("Errore mappa: " + e.getMessage());
+    addNotification("Errore caricamento mappa", ERROR);
+  }
+}
+
+void mapImageSelected(File selection) {
+  if (selection != null) {
+    loadMapImage(selection.getAbsolutePath());
   }
 }
 
