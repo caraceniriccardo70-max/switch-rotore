@@ -521,7 +521,7 @@ void drawAntennaPanel() {
     textFont(fontRegular);
     textSize(10);
     textAlign(LEFT, TOP);
-    text("NESSUNA antenna attiva", px + 20, py + 45);
+    text("Nessuna antenna attiva", px + 20, py + 45);
   } else {
     fill(theme.accent);
     textFont(fontRegular);
@@ -935,8 +935,8 @@ void drawRotatorButtons() {
     drawBrakeDelaySlider(centerX, btnY + btnH + (goToActive ? 70 : 55));
     
   } else {
-    // Layout 3 pulsanti senza freno: CCW | HALT | CW (pulsanti più larghi)
-    float totalWidth = 60.0 * 4 + gap * 3;
+    // Layout 3 pulsanti senza freno: CCW | HALT | CW (stessa larghezza totale del layout a 4 per coerenza visiva)
+    float totalWidth = 60.0 * 4 + gap * 3; // larghezza totale invariata = 264px
     float btnW = (totalWidth - gap * 2) / 3;
     float startX = centerX - totalWidth / 2;
     
@@ -3363,7 +3363,7 @@ void parseRotatorStatusFromJson(JSONObject d) {
 void loadMapImage(String path) {
   try {
     PImage img = loadImage(path);
-    if (img == null || img.width <= 0) {
+    if (img == null || img.width <= 0 || img.height <= 0) {
       addDebugLog("Errore caricamento mappa: " + path);
       addNotification("Errore caricamento mappa", ERROR);
       return;
