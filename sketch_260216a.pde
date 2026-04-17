@@ -288,6 +288,8 @@ boolean goToActive = false;
 float goToTarget = -1;
 float currentAzimuth = 0;
 float displayAzimuth = 0;
+boolean overlapActive = false;
+float rawAzimuth = 0;
 float mapCenterX, mapCenterY;
 float mapRadius = 110;
 
@@ -298,6 +300,7 @@ float powerSwitchAnim = 1.0; // Animation value for power switch (0.0 to 1.0)
 PFont fontRegular, fontBold, fontLarge, fontMono;
 
 ArrayList<String> debugLog = new ArrayList<String>();
+ArrayList<String> commandQueue = new ArrayList<String>();
 
 String[] tempAntennaNames = new String[6];
 int[] tempAntennaPins = new int[6];
@@ -636,9 +639,38 @@ void drawAzimuthMap() {
     ellipse(0, 0, mapRadius * 2 * i / 3, mapRadius * 2 * i / 3);
   }
   
-  stroke(theme.accent, 180);
+  stroke(overlapActive ? color(255, 100, 0, 180) : theme.accent, 180);
   strokeWeight(2);
   ellipse(0, 0, mapRadius * 2, mapRadius * 2);
+  
+  // Zona OVERLAP (0°-90° = equivalente a 360°-450°)
+  if (overlapActive) {
+    float overlapStart = radians(0 - 90);   // da Nord (0°)
+    float overlapEnd   = radians(90 - 90);  // a Est (90° = 450°)
+    fill(255, 100, 0, 30);
+    stroke(255, 100, 0, 120);
+    strokeWeight(1);
+    beginShape();
+    vertex(0, 0);
+    for (float a = overlapStart; a <= overlapEnd; a += 0.02) {
+      vertex(cos(a) * mapRadius, sin(a) * mapRadius);
+    }
+    endShape(CLOSE);
+    
+    // Bordo overlap
+    noFill();
+    stroke(255, 100, 0, 180);
+    strokeWeight(2);
+    arc(0, 0, mapRadius * 2, mapRadius * 2, overlapStart, overlapEnd);
+    
+    // Etichetta OVERLAP
+    float midAngle = (overlapStart + overlapEnd) / 2;
+    fill(255, 140, 0, 200);
+    textFont(fontRegular);
+    textSize(8);
+    textAlign(CENTER, CENTER);
+    text("OVERLAP", cos(midAngle) * (mapRadius * 0.55), sin(midAngle) * (mapRadius * 0.55));
+  }
   
   for (int deg = 0; deg < 360; deg += 30) {
     float angle = radians(deg - 90);
@@ -710,14 +742,14 @@ void drawAzimuthMap() {
   strokeWeight(4);
   line(2, 2, cos(needleAngle) * (mapRadius - 15) + 2, sin(needleAngle) * (mapRadius - 15) + 2);
   
-  stroke(theme.accent);
+  stroke(overlapActive ? color(255, 100, 0) : theme.accent);
   strokeWeight(3);
   line(0, 0, cos(needleAngle) * (mapRadius - 15), sin(needleAngle) * (mapRadius - 15));
   
   pushMatrix();
   translate(cos(needleAngle) * (mapRadius - 15), sin(needleAngle) * (mapRadius - 15));
   rotate(needleAngle + HALF_PI);
-  fill(theme.accent);
+  fill(overlapActive ? color(255, 100, 0) : theme.accent);
   noStroke();
   triangle(-5, -10, 5, -10, 0, 0);
   popMatrix();
@@ -760,6 +792,14 @@ void drawAzimuthMap() {
     fill(theme.warning);
     textSize(8);
     text("TARGET: " + nf(targetAzimuth, 1, 1) + "°", 0, 22);
+  }
+  
+  // Indicatore OVERLAP nel centro del quadrante
+  if (overlapActive) {
+    fill(255, 140, 0);
+    textSize(8);
+    textFont(fontBold);
+    text("OVERLAP", 0, targetAzimuth >= 0 ? 32 : 22);
   }
   
   popMatrix();
@@ -2783,19 +2823,43 @@ void sendRotatorCommand(String cmd) {
       rotSerial.write(cmd + "\n");
       addDebugLog("TX ROT: " + cmd);
     } else if (rotConnMode == 1) {
-      // HTTP GET request to /command?cmd=...
-      try {
-        String encodedCmd = java.net.URLEncoder.encode(cmd, "UTF-8");
-        String url = "http://" + rotWifiIP + ":" + rotWifiPort + "/command?cmd=" + encodedCmd;
-        loadStrings(url);
-        addDebugLog("TX ROT HTTP: " + cmd);
-      } catch (Exception he) {
-        addDebugLog("ERRORE TX ROT HTTP: " + he.getMessage());
+      // WiFi HTTP: accoda e invia in thread separato
+      synchronized(commandQueue) {
+        commandQueue.add(cmd);
       }
+      thread("sendHttpCommandThread");
     }
   } catch (Exception e) {
     addDebugLog("ERRORE TX ROT: " + e.getMessage());
     if (rotConnMode == 0) rotConnected = false;
+  }
+}
+
+void sendHttpCommandThread() {
+  String cmd = null;
+  synchronized(commandQueue) {
+    if (commandQueue.size() > 0) {
+      cmd = commandQueue.remove(0);
+    }
+  }
+  if (cmd == null) return;
+
+  try {
+    String encodedCmd = java.net.URLEncoder.encode(cmd, "UTF-8");
+    String url = "http://" + rotWifiIP + ":" + rotWifiPort + "/command?cmd=" + encodedCmd;
+    String[] response = loadStrings(url);
+    if (response != null && response.length > 0) {
+      addDebugLog("TX ROT HTTP OK: " + cmd);
+    } else {
+      addDebugLog("TX ROT HTTP: nessuna risposta per " + cmd);
+    }
+  } catch (Exception e) {
+    addDebugLog("ERRORE TX ROT HTTP: " + e.getMessage());
+    httpPollFailCount++;
+    if (httpPollFailCount >= 10) {
+      rotConnected = false;
+      addNotification("Connessione rotore persa", ERROR);
+    }
   }
 }
 
@@ -2925,12 +2989,19 @@ void parseRotatorStatusFromJson(JSONObject d) {
     float azi = d.getFloat("displayAzi", currentAzimuth);
     currentAzimuth = smoothingFactor * azi + (1.0 - smoothingFactor) * currentAzimuth;
     
+    if (d.hasKey("rawAzi")) rawAzimuth = d.getFloat("rawAzi");
+    
     rotatorCW  = d.getBoolean("cw");
     rotatorCCW = d.getBoolean("ccw");
     rotatorPowerOn = d.getBoolean("power");
     brakeReleased  = d.getBoolean("brake");
     goToActive     = d.getBoolean("goTo");
+    overlapActive  = d.getBoolean("overlap");
     if (goToActive) goToTarget = d.getFloat("target", goToTarget);
+    
+    // Sincronizza stato pulsanti CW/CCW con stato reale dei relè
+    cwButtonPressed  = rotatorCW;
+    ccwButtonPressed = rotatorCCW;
     
     if (d.hasKey("smooth"))     smoothingFactor   = constrain(d.getFloat("smooth"),    0.01, 1.0);
     if (d.hasKey("relayComp"))  relayCompensation = d.getFloat("relayComp");
