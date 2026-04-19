@@ -165,6 +165,20 @@ class SettingsManager {
     config.setBoolean("showMapImage", true);
     config.setFloat("mapImageAlpha", 0.4);
     config.setString("mapImagePath", "");
+    
+    // Nuovi parametri
+    config.setBoolean("disconnectRelaysOnExit", true);
+    config.setBoolean("sendHaltOnExit", true);
+    config.setBoolean("confirmOnExit", true);
+    config.setBoolean("rememberLastAntenna", true);
+    config.setBoolean("autoReconnect", true);
+    config.setInt("lastSelectedAntenna", -1);
+    config.setInt("currentThemeIdx", 0);
+    config.setBoolean("showAnimations", true);
+    config.setBoolean("showStatusBarFlag", true);
+    config.setBoolean("showDegreeLabels", true);
+    config.setBoolean("showCardinals", true);
+    config.setBoolean("showBeamPattern", true);
     saveSettings();
   }
   
@@ -196,6 +210,22 @@ class SettingsManager {
       showMapImage = config.getBoolean("showMapImage", true);
       mapImageAlpha = config.getFloat("mapImageAlpha", 0.4);
       mapImagePath = config.getString("mapImagePath", "");
+      
+      // Nuovi parametri
+      disconnectRelaysOnExit = config.getBoolean("disconnectRelaysOnExit", true);
+      sendHaltOnExit = config.getBoolean("sendHaltOnExit", true);
+      confirmOnExit = config.getBoolean("confirmOnExit", true);
+      rememberLastAntenna = config.getBoolean("rememberLastAntenna", true);
+      autoReconnect = config.getBoolean("autoReconnect", true);
+      lastSelectedAntenna = config.getInt("lastSelectedAntenna", -1);
+      currentThemeIdx = config.getInt("currentThemeIdx", 0);
+      showAnimations = config.getBoolean("showAnimations", true);
+      showStatusBarFlag = config.getBoolean("showStatusBarFlag", true);
+      showDegreeLabels = config.getBoolean("showDegreeLabels", true);
+      showCardinals = config.getBoolean("showCardinals", true);
+      showBeamPattern = config.getBoolean("showBeamPattern", true);
+      
+      if (currentThemeIdx != 0) applyTheme(currentThemeIdx);
     } catch (Exception e) { }
   }
   
@@ -229,6 +259,21 @@ class SettingsManager {
       config.setBoolean("showMapImage", showMapImage);
       config.setFloat("mapImageAlpha", mapImageAlpha);
       config.setString("mapImagePath", mapImagePath);
+      
+      // Nuovi parametri
+      config.setBoolean("disconnectRelaysOnExit", disconnectRelaysOnExit);
+      config.setBoolean("sendHaltOnExit", sendHaltOnExit);
+      config.setBoolean("confirmOnExit", confirmOnExit);
+      config.setBoolean("rememberLastAntenna", rememberLastAntenna);
+      config.setBoolean("autoReconnect", autoReconnect);
+      config.setInt("lastSelectedAntenna", lastSelectedAntenna);
+      config.setInt("currentThemeIdx", currentThemeIdx);
+      config.setBoolean("showAnimations", showAnimations);
+      config.setBoolean("showStatusBarFlag", showStatusBarFlag);
+      config.setBoolean("showDegreeLabels", showDegreeLabels);
+      config.setBoolean("showCardinals", showCardinals);
+      config.setBoolean("showBeamPattern", showBeamPattern);
+      
       saveJSONObject(config, settingsFile);
     } catch (Exception e) { }
   }
@@ -337,6 +382,24 @@ boolean[] tempAntennaDirective = new boolean[6];
 int editingField = -1;
 String inputBuffer = "";
 int currentSettingsTab = 0;
+
+// ─── Impostazioni chiusura / avvio ────────────────────────────────────────
+boolean disconnectRelaysOnExit = true;
+boolean sendHaltOnExit = true;
+boolean confirmOnExit = true;
+boolean rememberLastAntenna = true;
+boolean autoReconnect = true;
+int lastSelectedAntenna = -1;
+
+// ─── Tema e aspetto ───────────────────────────────────────────────────────
+int currentThemeIdx = 0;
+boolean showAnimations = true;
+boolean showStatusBarFlag = true;
+
+// ─── Visualizzazione quadrante ────────────────────────────────────────────
+boolean showDegreeLabels = true;
+boolean showCardinals = true;
+boolean showBeamPattern = true;
 
 String[] availablePorts;
 
@@ -475,9 +538,13 @@ void drawBackground() {
 
 void updateAnimations() {
   for (int i = 0; i < buttonAnim.length; i++) {
-    // Smoother animation with faster response
-    float speed = buttonHover[i] ? 0.25 : 0.18;
-    buttonAnim[i] = lerp(buttonAnim[i], buttonHover[i] ? 1.0 : 0.0, speed);
+    if (showAnimations) {
+      // Smoother animation with faster response
+      float speed = buttonHover[i] ? 0.25 : 0.18;
+      buttonAnim[i] = lerp(buttonAnim[i], buttonHover[i] ? 1.0 : 0.0, speed);
+    } else {
+      buttonAnim[i] = buttonHover[i] ? 1.0 : 0.0;
+    }
   }
   // Smoother azimuth animation
   displayAzimuth = lerp(displayAzimuth, currentAzimuth, 0.18);
@@ -509,12 +576,12 @@ void drawTargetScreen() {
 void drawControlScreen() {
   drawAntennaPanel();
   drawRotatorPanel();
-  drawStatusBar();
+  if (showStatusBarFlag) drawStatusBar();
 }
 
 void drawAntennaPanel() {
   float px = 20, py = 55, pw = 290, ph = 420;
-  drawPanel(px, py, pw, ph, "📡 ANTENNA SELECTOR", true);
+  drawPanel(px, py, pw, ph, "ANTENNA SELECTOR", true);
   
   if (selectedAntenna < 0) {
     fill(theme.textDim);
@@ -622,7 +689,7 @@ void drawAntennaButton(int idx, float x, float y, float w, float h) {
 
 void drawRotatorPanel() {
   float px = 330, py = 55, pw = 450, ph = 420;
-  drawPanel(px, py, pw, ph, "🔄 ROTATOR CONTROL", true);
+  drawPanel(px, py, pw, ph, "ROTATOR CONTROL", true);
   
   mapCenterX = px + pw/2;
   mapCenterY = py + 185;
@@ -775,24 +842,28 @@ void drawAzimuthMap() {
     strokeWeight(deg % 90 == 0 ? 2 : 1);
     line(cos(angle) * innerR, sin(angle) * innerR, cos(angle) * mapRadius, sin(angle) * mapRadius);
     
-    fill(theme.textDim);
-    textFont(fontRegular);
-    textSize(deg % 90 == 0 ? 10 : 9);
-    textAlign(CENTER, CENTER);
-    text(deg + "°", cos(angle) * (mapRadius + 18), sin(angle) * (mapRadius + 18));
+    if (showDegreeLabels) {
+      fill(theme.textDim);
+      textFont(fontRegular);
+      textSize(deg % 90 == 0 ? 10 : 9);
+      textAlign(CENTER, CENTER);
+      text(deg + "\u00b0", cos(angle) * (mapRadius + 18), sin(angle) * (mapRadius + 18));
+    }
   }
   
-  String[] cardinals = {"N", "E", "S", "W"};
-  for (int i = 0; i < 4; i++) {
-    float angle = radians(i * 90 - 90);
-    fill(theme.text);
-    textFont(fontBold);
-    textSize(14);
-    textAlign(CENTER, CENTER);
-    text(cardinals[i], cos(angle) * (mapRadius + 35), sin(angle) * (mapRadius + 35));
+  if (showCardinals) {
+    String[] cardinals = {"N", "E", "S", "W"};
+    for (int i = 0; i < 4; i++) {
+      float angle = radians(i * 90 - 90);
+      fill(theme.text);
+      textFont(fontBold);
+      textSize(14);
+      textAlign(CENTER, CENTER);
+      text(cardinals[i], cos(angle) * (mapRadius + 35), sin(angle) * (mapRadius + 35));
+    }
   }
   
-  if (selectedAntenna >= 0 && antennaDirective[selectedAntenna]) {
+  if (selectedAntenna >= 0 && antennaDirective[selectedAntenna] && showBeamPattern) {
     float patternAngle = radians(displayAzimuth - 90);
     float beamWidth = radians(50);
     fill(theme.accent, 25);
@@ -1314,14 +1385,14 @@ void drawStatusBar() {
   
   // ANT status
   String antStatus = antConnected ? (antConnMode == 1 ? "WiFi" : "USB") : "DISC";
-  drawStatusItem(startX, iconY, "📡 ANT", antStatus, antConnected ? theme.success : theme.error);
+  drawStatusItem(startX, iconY, "ANT", antStatus, antConnected ? theme.success : theme.error);
   
   // ROT status (con IP se WiFi)
   String rotStatus = rotConnected ? (rotConnMode == 1 ? rotWifiIP : "USB") : "DISC";
-  drawStatusItem(startX + spacing, iconY, "⚙ ROT", rotStatus, rotConnected ? theme.success : theme.error);
+  drawStatusItem(startX + spacing, iconY, "ROT", rotStatus, rotConnected ? theme.success : theme.error);
   
   // Sistema
-  drawStatusItem(startX + spacing * 2, iconY, "⚡ Sist", systemOn ? "ON" : "OFF", systemOn ? theme.success : theme.warning);
+  drawStatusItem(startX + spacing * 2, iconY, "Sist", systemOn ? "ON" : "OFF", systemOn ? theme.success : theme.warning);
   
   // Direzione
   String rotatorSt = "STOP";
@@ -1401,21 +1472,24 @@ void drawStatusItem(float x, float y, String label, String value, color c) {
 
 void drawSettingsScreen() {
   float px = 40, py = 60, pw = 720, ph = 400;
-  drawPanel(px, py, pw, ph, "⚙ IMPOSTAZIONI", false);
+  drawPanel(px, py, pw, ph, "IMPOSTAZIONI", false);
   drawSettingsTabs(px + 20, py + 45);
   
   switch(currentSettingsTab) {
-    case 0: drawAntennaSettings(px, py + 90); break;
-    case 1: drawConnectionSettings(px, py + 90); break;
-    case 2: drawSystemSettings(px, py + 90); break;
+    case 0: drawConnectionSettings(px, py + 90); break;
+    case 1: drawAntennaSettings(px, py + 90); break;
+    case 2: drawMapSettings(px, py + 90); break;
+    case 3: drawLookSettings(px, py + 90); break;
+    case 4: drawPreferencesSettings(px, py + 90); break;
   }
   
-  drawSettingsButtons(px, py + ph - 50);
+  // Global Save/Cancel only needed for Antenne tab (temp values)
+  if (currentSettingsTab == 1) drawSettingsButtons(px, py + ph - 50);
 }
 
 void drawSettingsTabs(float x, float y) {
-  String[] tabs = {"Antenne", "Connessione", "Sistema"};
-  float tabW = 110, tabH = 32, gap = 10;
+  String[] tabs = {"Connessioni", "Antenne", "Mappa", "Look", "Preferenze"};
+  float tabW = 120, tabH = 32, gap = 8;
   
   for (int i = 0; i < tabs.length; i++) {
     float tx = x + i * (tabW + gap);
@@ -1701,32 +1775,8 @@ void drawConnectionSettings(float px, float py) {
   noStroke();
   ellipse(ledX, rotBtnY + 16, 10, 10);
   
-  // Auto-connect checkbox
-  float autoY = rotBtnY + 45;
-  float checkX = px + 30;
-  float checkSize = 18;
-  
-  fill(autoConnect ? theme.accent : theme.panel);
-  stroke(autoConnect ? theme.accent : theme.border);
-  strokeWeight(1);
-  rect(checkX, autoY, checkSize, checkSize, 4);
-  
-  if (autoConnect) {
-    stroke(theme.primary);
-    strokeWeight(2);
-    noFill();
-    line(checkX + 4, autoY + checkSize/2, checkX + checkSize/2 - 1, autoY + checkSize - 5);
-    line(checkX + checkSize/2 - 1, autoY + checkSize - 5, checkX + checkSize - 4, autoY + 4);
-  }
-  
-  fill(theme.text);
-  textFont(fontRegular);
-  textSize(11);
-  textAlign(LEFT, CENTER);
-  text("Connessione automatica all'avvio", checkX + checkSize + 8, autoY + checkSize/2);
-  
   // Scan Ports Button
-  float scanBtnY = autoY + 30;
+  float scanBtnY = rotBtnY + 30;
   boolean scanHover = mouseX > px + 30 && mouseX < px + 130 && mouseY > scanBtnY && mouseY < scanBtnY + 28;
   fill(scanHover ? lerpColor(theme.warning, theme.text, 0.2) : theme.warning);
   stroke(theme.warning);
@@ -1739,24 +1789,157 @@ void drawConnectionSettings(float px, float py) {
   text("SCAN PORTE", px + 80, scanBtnY + 14);
 }
 
-void drawSystemSettings(float px, float py) {
-  fill(theme.text);
-  textFont(fontBold);
-  textSize(12);
-  textAlign(LEFT, CENTER);
-  text("OPZIONI:", px + 30, py + 15);
+void drawMapSettings(float px, float py) {
+  // ── Mostra mappa nel quadrante ─────────────────────────────────────────
+  drawCheckbox("Mostra immagine mappa", showMapImage, px + 30, py);
   
-  drawCheckbox(px + 30, py + 40, debugMode, 100);
-  fill(theme.text);
+  // Percorso immagine mappa
+  float pathY = py + 28;
+  fill(theme.textDim);
   textFont(fontRegular);
+  textSize(9);
+  textAlign(LEFT, CENTER);
+  text("Percorso mappa:", px + 30, pathY + 6);
+  
+  fill(theme.panel);
+  stroke(theme.border);
+  strokeWeight(1);
+  float pathFieldX = px + 130, pathFieldW = 250, pathFieldH = 22;
+  rect(pathFieldX, pathY - 4, pathFieldW, pathFieldH, 4);
+  
+  String dispPath = mapImagePath.length() == 0 ? "(nessun file)" :
+    (mapImagePath.length() > 35 ? "..." + mapImagePath.substring(mapImagePath.length() - 32) : mapImagePath);
+  fill(mapImagePath.length() == 0 ? theme.textDim : theme.text);
+  textFont(fontRegular);
+  textSize(9);
+  textAlign(LEFT, CENTER);
+  text(dispPath, pathFieldX + 5, pathY + 7);
+  
+  boolean sfogliaHover = mouseX > px + 390 && mouseX < px + 460 && mouseY > pathY - 4 && mouseY < pathY + 18;
+  fill(sfogliaHover ? lerpColor(theme.accent, theme.text, 0.2) : theme.accent);
+  stroke(theme.accent);
+  rect(px + 390, pathY - 4, 70, 22, 6);
+  fill(theme.primary);
+  textFont(fontBold);
+  textSize(9);
+  textAlign(CENTER, CENTER);
+  text("Sfoglia", px + 425, pathY + 7);
+  
+  if (mapImagePath.length() > 0) {
+    fill(maskedMapImage != null ? theme.success : theme.error);
+    textFont(fontRegular);
+    textSize(9);
+    textAlign(LEFT, CENTER);
+    text((maskedMapImage != null ? "(OK) " : "(ERR) ") + (mapImagePath.length() > 30 ? mapImagePath.substring(mapImagePath.length() - 27) : mapImagePath), px + 30, pathY + 29);
+  }
+  
+  // ── Opacita mappa ──────────────────────────────────────────────────────
+  float maY = py + 70;
+  float maSliderX = px + 170, maSliderW = 200, maSliderH = 4, maKnobSize = 14;
+  
+  fill(showMapImage ? theme.textDim : color(red(theme.textDim), green(theme.textDim), blue(theme.textDim), 80));
+  textFont(fontRegular);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text("Opacita mappa:", px + 30, maY + 2);
+  
+  fill(theme.secondary);
+  stroke(theme.border);
+  strokeWeight(1);
+  rect(maSliderX, maY - 2, maSliderW, maSliderH, 2);
+  
+  float maKnobX = map(mapImageAlpha, 0.0, 1.0, maSliderX, maSliderX + maSliderW);
+  boolean maHover = dist(mouseX, mouseY, maKnobX, maY - 2 + maSliderH/2) < maKnobSize;
+  if ((maHover || mapAlphaSliderDragging) && showMapImage) {
+    fill(theme.accent, 60); noStroke(); ellipse(maKnobX, maY - 2 + maSliderH/2, maKnobSize + 8, maKnobSize + 8);
+  }
+  fill(mapAlphaSliderDragging ? theme.accent : (showMapImage ? theme.text : theme.textDim));
+  stroke(showMapImage ? theme.accent : theme.border);
+  strokeWeight(2);
+  ellipse(maKnobX, maY - 2 + maSliderH/2, maKnobSize, maKnobSize);
+  fill(showMapImage ? theme.text : theme.textDim);
+  textFont(fontBold);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text(int(mapImageAlpha * 100) + "%", maSliderX + maSliderW + 10, maY + 2);
+  
+  // ── Separator ──────────────────────────────────────────────────────────
+  stroke(theme.border, 80);
+  strokeWeight(1);
+  line(px + 30, maY + 22, px + 680, maY + 22);
+  
+  // ── Checkboxes visibilita ──────────────────────────────────────────────
+  float chkY = maY + 35;
+  float rowH = 26;
+  drawCheckbox("Mostra controlli freno", showBrakeControls, px + 30, chkY);
+  drawCheckbox("Mostra etichette gradi", showDegreeLabels, px + 30, chkY + rowH);
+  drawCheckbox("Mostra punti cardinali (N/E/S/W)", showCardinals, px + 30, chkY + rowH * 2);
+  drawCheckbox("Mostra pattern antenna direttiva", showBeamPattern, px + 30, chkY + rowH * 3);
+}
+
+void drawLookSettings(float px, float py) {
+  // ── Selezione tema ─────────────────────────────────────────────────────
+  fill(theme.textDim);
+  textFont(fontBold);
   textSize(11);
   textAlign(LEFT, CENTER);
-  text("Modalità Debug", px + 55, py + 49);
+  text("TEMA COLORI:", px + 30, py + 10);
   
-  // Smoothing factor slider
-  float sliderW = 220, sliderH = 4, knobSize = 14;
-  float sfY = py + 85;
-  float sfSliderX = px + 130;
+  String[] themeNames = {"Dark (Default)", "Midnight Blue", "Green Terminal"};
+  float themeBtnW = 130, themeBtnH = 34, themeBtnGap = 12;
+  float themeBtnY = py + 22;
+  
+  for (int i = 0; i < themeNames.length; i++) {
+    float tbx = px + 30 + i * (themeBtnW + themeBtnGap);
+    boolean tHover = mouseX > tbx && mouseX < tbx + themeBtnW && mouseY > themeBtnY && mouseY < themeBtnY + themeBtnH;
+    boolean tActive = (currentThemeIdx == i);
+    
+    fill(tActive ? theme.accent : tHover ? theme.hover : theme.secondary);
+    stroke(tActive ? theme.accent : theme.border);
+    strokeWeight(tActive ? 2 : 1);
+    rect(tbx, themeBtnY, themeBtnW, themeBtnH, 8);
+    
+    fill(tActive ? theme.primary : theme.text);
+    textFont(fontBold);
+    textSize(10);
+    textAlign(CENTER, CENTER);
+    text(themeNames[i], tbx + themeBtnW / 2, themeBtnY + themeBtnH / 2);
+  }
+  
+  // ── Separator ──────────────────────────────────────────────────────────
+  stroke(theme.border, 80);
+  strokeWeight(1);
+  line(px + 30, py + 72, px + 680, py + 72);
+  
+  // ── Checkboxes aspetto ─────────────────────────────────────────────────
+  float chkY = py + 84;
+  float rowH = 26;
+  drawCheckbox("Attiva animazioni", showAnimations, px + 30, chkY);
+  drawCheckbox("Mostra barra stato", showStatusBarFlag, px + 30, chkY + rowH);
+}
+
+void drawPreferencesSettings(float px, float py) {
+  float rowH = 22;
+  float y = py;
+  
+  // ── Checkboxes comportamento ───────────────────────────────────────────
+  drawCheckbox("Spegni rele switch alla chiusura", disconnectRelaysOnExit, px + 30, y);
+  drawCheckbox("Invia HALT al rotore alla chiusura", sendHaltOnExit, px + 30, y + rowH);
+  drawCheckbox("Chiedi conferma prima di uscire", confirmOnExit, px + 30, y + rowH * 2);
+  drawCheckbox("Auto-connetti all'avvio", autoConnect, px + 30, y + rowH * 3);
+  drawCheckbox("Ricorda ultima antenna selezionata", rememberLastAntenna, px + 30, y + rowH * 4);
+  drawCheckbox("Modalita debug", debugMode, px + 30, y + rowH * 5);
+  
+  // ── Separator ──────────────────────────────────────────────────────────
+  float sepY = y + rowH * 6 + 6;
+  stroke(theme.border, 80);
+  strokeWeight(1);
+  line(px + 30, sepY, px + 680, sepY);
+  
+  // ── Smoothing factor slider ─────────────────────────────────────────────
+  float sliderW = 200, sliderH = 4, knobSize = 14;
+  float sfY = sepY + 18;
+  float sfSliderX = px + 170;
   
   fill(theme.textDim);
   textFont(fontRegular);
@@ -1782,15 +1965,15 @@ void drawSystemSettings(float px, float py) {
   textAlign(LEFT, CENTER);
   text(nf(smoothingFactor, 1, 2), sfSliderX + sliderW + 10, sfY + 2);
   
-  // Relay compensation slider
-  float rcY = sfY + 38;
-  float rcSliderX = px + 130;
+  // ── Relay compensation slider ───────────────────────────────────────────
+  float rcY = sfY + 35;
+  float rcSliderX = px + 170;
   
   fill(theme.textDim);
   textFont(fontRegular);
   textSize(10);
   textAlign(LEFT, CENTER);
-  text("Relay Comp (°):", px + 30, rcY + 2);
+  text("Relay Comp (\u00b0):", px + 30, rcY + 2);
   
   fill(theme.secondary);
   stroke(theme.border);
@@ -1810,94 +1993,30 @@ void drawSystemSettings(float px, float py) {
   textAlign(LEFT, CENTER);
   text(nf(relayCompensation, 1, 1) + "\u00b0", rcSliderX + sliderW + 10, rcY + 2);
   
-  // ─── Controlli freno ────────────────────────────────────────────────────
-  float brakeCheckY = rcY + 38;
-  drawCheckbox(px + 30, brakeCheckY, showBrakeControls, 101);
-  fill(theme.text);
-  textFont(fontRegular);
-  textSize(11);
-  textAlign(LEFT, CENTER);
-  text("Mostra controllo Freno", px + 55, brakeCheckY + 9);
-  
-  // ─── Controlli mappa ────────────────────────────────────────────────────
-  float mapCheckY = brakeCheckY + 28;
-  drawCheckbox(px + 30, mapCheckY, showMapImage, 102);
-  fill(theme.text);
-  textFont(fontRegular);
-  textSize(11);
-  textAlign(LEFT, CENTER);
-  text("Mostra mappa nel quadrante", px + 55, mapCheckY + 9);
-  
-  // Pulsante Carica Mappa
-  float mapBtnX = px + 310, mapBtnY = mapCheckY;
-  boolean mapBtnHover = mouseX > mapBtnX && mouseX < mapBtnX + 110 && mouseY > mapBtnY && mouseY < mapBtnY + 22;
-  fill(mapBtnHover ? lerpColor(theme.accent, theme.text, 0.2) : theme.accent);
-  stroke(theme.accent);
-  rect(mapBtnX, mapBtnY, 110, 22, 6);
+  // ── Pulsanti Salva/Reset ────────────────────────────────────────────────
+  float btnY = rcY + 40;
+  boolean savePrefHover = mouseX > px + 30 && mouseX < px + 160 && mouseY > btnY && mouseY < btnY + 32;
+  fill(savePrefHover ? lerpColor(theme.success, theme.text, 0.2) : theme.success);
+  stroke(theme.success);
+  rect(px + 30, btnY, 130, 32, 8);
   fill(theme.primary);
   textFont(fontBold);
-  textSize(9);
+  textSize(10);
   textAlign(CENTER, CENTER);
-  text("Carica Mappa...", mapBtnX + 55, mapBtnY + 11);
+  text("Salva Preferenze", px + 95, btnY + 16);
   
-  // Slider trasparenza mappa
-  float maY = mapCheckY + 32;
-  float maSliderX = px + 130;
-  float maSliderW = 220, maSliderH = 4, maKnobSize = 14;
-  
-  fill(showMapImage ? theme.textDim : color(theme.textDim, 80));
-  textFont(fontRegular);
-  textSize(10);
-  textAlign(LEFT, CENTER);
-  text("Trasparenza mappa:", px + 30, maY + 2);
-  
-  fill(theme.secondary);
-  stroke(theme.border);
-  strokeWeight(1);
-  rect(maSliderX, maY - 2, maSliderW, maSliderH, 2);
-  
-  float maKnobX = map(mapImageAlpha, 0.0, 1.0, maSliderX, maSliderX + maSliderW);
-  boolean maHover = dist(mouseX, mouseY, maKnobX, maY - 2 + maSliderH/2) < maKnobSize;
-  if ((maHover || mapAlphaSliderDragging) && showMapImage) { fill(theme.accent, 60); noStroke(); ellipse(maKnobX, maY - 2 + maSliderH/2, maKnobSize + 8, maKnobSize + 8); }
-  fill(mapAlphaSliderDragging ? theme.accent : (showMapImage ? theme.text : theme.textDim));
-  stroke(showMapImage ? theme.accent : theme.border);
-  strokeWeight(2);
-  ellipse(maKnobX, maY - 2 + maSliderH/2, maKnobSize, maKnobSize);
-  fill(showMapImage ? theme.text : theme.textDim);
-  textFont(fontBold);
-  textSize(10);
-  textAlign(LEFT, CENTER);
-  text(int(mapImageAlpha * 100) + "%", maSliderX + maSliderW + 10, maY + 2);
-  
-  // Percorso mappa attuale
-  if (mapImagePath.length() > 0) {
-    String shortPath = mapImagePath.length() > 40 ? "..." + mapImagePath.substring(mapImagePath.length() - 37) : mapImagePath;
-    fill(maskedMapImage != null ? theme.success : theme.error);
-    textFont(fontRegular);
-    textSize(9);
-    textAlign(LEFT, CENTER);
-    text((maskedMapImage != null ? "✓ " : "✗ ") + shortPath, px + 30, maY + 20);
-  }
-  
-  // ─── Reset e versione ───────────────────────────────────────────────────
-  float btnY = py + 245;
-  boolean resetHover = mouseX > px + 30 && mouseX < px + 150 && mouseY > btnY && mouseY < btnY + 35;
-  
-  fill(resetHover ? lerpColor(theme.warning, theme.text, 0.2) : theme.warning);
+  boolean resetPrefHover = mouseX > px + 175 && mouseX < px + 305 && mouseY > btnY && mouseY < btnY + 32;
+  fill(resetPrefHover ? lerpColor(theme.warning, theme.text, 0.2) : theme.warning);
   stroke(theme.warning);
-  rect(px + 30, btnY, 120, 35, 8);
-  
+  rect(px + 175, btnY, 130, 32, 8);
   fill(theme.primary);
-  textFont(fontBold);
-  textSize(11);
-  textAlign(CENTER, CENTER);
-  text("RESET DEFAULT", px + 90, btnY + 17);
+  text("Reset Default", px + 240, btnY + 16);
   
   fill(theme.textDim);
   textFont(fontRegular);
   textSize(9);
-  textAlign(LEFT, TOP);
-  text("v" + APP_VERSION + "  |  TX HTTP: " + httpCommandCount + "  |  Errori: " + httpErrorCount, px + 30, btnY + 45);
+  textAlign(LEFT, CENTER);
+  text("v" + APP_VERSION + "  |  TX HTTP: " + httpCommandCount + "  |  Errori: " + httpErrorCount, px + 330, btnY + 16);
 }
 
 void drawSettingsButtons(float px, float py) {
@@ -1930,7 +2049,7 @@ void drawSettingsButtons(float px, float py) {
 
 void drawDebugScreen() {
   float px = 40, py = 60, pw = 720, ph = 400;
-  drawPanel(px, py, pw, ph, "⚙ DEBUG CONSOLE", false);
+  drawPanel(px, py, pw, ph, "DEBUG CONSOLE", false);
   
   // Stats bar
   fill(theme.secondary);
@@ -2007,11 +2126,107 @@ void drawPanel(float x, float y, float w, float h, String title, boolean showGlo
   textFont(fontLarge);
   textSize(15);
   textAlign(LEFT, TOP);
-  text(title, x + 20, y + 15);
+  // Strip non-ASCII characters (emoji, Unicode icons) that Processing cannot render
+  String cleanTitle = title.replaceAll("[^\\x00-\\x7F]", "").trim();
+  text(cleanTitle, x + 20, y + 15);
   
   stroke(theme.border);
   strokeWeight(1);
   line(x + 20, y + 38, x + w - 20, y + 38);
+}
+
+// ─── Checkbox con etichetta (overload con label) ─────────────────────────
+void drawCheckbox(String label, boolean checked, float x, float y) {
+  float size = 18;
+  boolean hover = mouseX > x && mouseX < x + size && mouseY > y && mouseY < y + size;
+  
+  fill(checked ? theme.accent : hover ? theme.hover : theme.panel);
+  stroke(checked ? theme.accent : theme.border);
+  strokeWeight(1);
+  rect(x, y, size, size, 4);
+  
+  if (checked) {
+    stroke(theme.primary);
+    strokeWeight(2);
+    noFill();
+    line(x + 4, y + size/2, x + size/2 - 1, y + size - 5);
+    line(x + size/2 - 1, y + size - 5, x + size - 4, y + 4);
+  }
+  
+  fill(theme.text);
+  textFont(fontRegular);
+  textSize(11);
+  textAlign(LEFT, CENTER);
+  text(label, x + size + 8, y + size/2);
+}
+
+// ─── Sotto-pannello per raggruppare opzioni ─────────────────────────────
+void drawSettingsSubPanel(float x, float y, float w, float h, String title) {
+  fill(theme.secondary);
+  stroke(theme.border);
+  strokeWeight(1);
+  rect(x, y, w, h, 8);
+  
+  fill(theme.accent);
+  textFont(fontBold);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text(title, x + 10, y + 12);
+  
+  stroke(theme.border, 60);
+  strokeWeight(1);
+  line(x + 10, y + 22, x + w - 10, y + 22);
+}
+
+// ─── Etichetta grigia ───────────────────────────────────────────────────
+void drawSettingsLabel(String label, float x, float y) {
+  fill(theme.textDim);
+  textFont(fontRegular);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text(label, x, y);
+}
+
+// ─── Applica tema colori ─────────────────────────────────────────────────
+void applyTheme(int idx) {
+  currentThemeIdx = idx;
+  if (idx == 0) {
+    // Dark (Default)
+    theme.primary    = #000000;
+    theme.secondary  = #1A1A1A;
+    theme.accent     = #00FF88;
+    theme.background = #0A0A0A;
+    theme.panel      = #111111;
+    theme.panelLight = #1E1E1E;
+    theme.text       = #FFFFFF;
+    theme.textDim    = #888888;
+    theme.border     = #444444;
+    theme.hover      = #2A2A2A;
+  } else if (idx == 1) {
+    // Midnight Blue
+    theme.primary    = #0A0A1A;
+    theme.secondary  = #151530;
+    theme.accent     = #4488FF;
+    theme.background = #080815;
+    theme.panel      = #101025;
+    theme.panelLight = #1A1A35;
+    theme.text       = #DDDDFF;
+    theme.textDim    = #7777AA;
+    theme.border     = #333366;
+    theme.hover      = #20204A;
+  } else if (idx == 2) {
+    // Green Terminal
+    theme.primary    = #001100;
+    theme.secondary  = #0A1A0A;
+    theme.accent     = #00FF00;
+    theme.background = #000800;
+    theme.panel      = #0A140A;
+    theme.panelLight = #122012;
+    theme.text       = #00EE00;
+    theme.textDim    = #007700;
+    theme.border     = #003300;
+    theme.hover      = #1A2A1A;
+  }
 }
 
 void drawTopBar() {
@@ -2095,7 +2310,7 @@ void drawPowerSwitch(float x, float y) {
 }
 
 void drawNavigationBar() {
-  String[] items = {"⚡ CONTROLLO", "⚙ IMPOSTAZIONI", "DEBUG"};
+  String[] items = {"CONTROLLO", "IMPOSTAZIONI", "DEBUG"};
   float barW = 320, barH = 40;
   float startX = (width - barW) / 2;
   float startY = height - 48;
@@ -2210,19 +2425,41 @@ void mouseDragged() {
     }
   }
   
-  // Handle sliders in system settings (screen 1, tab 2)
+  // Handle sliders in Mappa settings (screen 1, tab 2) - map alpha
   if (currentScreen == 1 && currentSettingsTab == 2) {
-    float px = 40, py = 60;
-    float spY = py + 90;
-    float sliderW = 220, sliderH = 4, knobSize = 14;
-    float sfSliderX = px + 130;
-    float sfY = spY + 85;
-    float rcSliderX = px + 130;
-    float rcY = sfY + 38;
+    float px = 40;
+    float contentY = 60 + 90; // py=60, content starts at py+90=150
+    float maY = contentY + 70;
+    float maSliderX = px + 170;
+    float maSliderW = 200, maSliderH = 4, maKnobSize = 14;
+    
+    float maKnobX = map(mapImageAlpha, 0.0, 1.0, maSliderX, maSliderX + maSliderW);
+    if (!mapAlphaSliderDragging && showMapImage &&
+        dist(mouseX, mouseY, maKnobX, maY - 2 + maSliderH/2) < maKnobSize) {
+      mapAlphaSliderDragging = true;
+    }
+    if (mapAlphaSliderDragging) {
+      mapImageAlpha = map(constrain(mouseX, maSliderX, maSliderX + maSliderW), maSliderX, maSliderX + maSliderW, 0.0, 1.0);
+      mapImageAlpha = constrain(mapImageAlpha, 0.0, 1.0);
+      return;
+    }
+  }
+  
+  // Handle sliders in Preferenze settings (screen 1, tab 4)
+  if (currentScreen == 1 && currentSettingsTab == 4) {
+    float px = 40;
+    float contentY = 60 + 90; // 150
+    float rowH = 22;
+    float sepY = contentY + rowH * 6 + 6;
+    float sliderW = 200, sliderH = 4, knobSize = 14;
+    float sfY = sepY + 18;
+    float sfSliderX = px + 170;
+    float rcY = sfY + 35;
+    float rcSliderX = px + 170;
     
     // Smooth factor knob
     float sfKnobX = map(smoothingFactor, 0.01, 1.0, sfSliderX, sfSliderX + sliderW);
-    if (!smoothSliderDragging && !relayCompSliderDragging && !mapAlphaSliderDragging &&
+    if (!smoothSliderDragging && !relayCompSliderDragging &&
         dist(mouseX, mouseY, sfKnobX, sfY - 2 + sliderH/2) < knobSize) {
       smoothSliderDragging = true;
     }
@@ -2234,30 +2471,13 @@ void mouseDragged() {
     
     // Relay comp knob
     float rcKnobX = map(relayCompensation, 0, 30, rcSliderX, rcSliderX + sliderW);
-    if (!smoothSliderDragging && !relayCompSliderDragging && !mapAlphaSliderDragging &&
+    if (!smoothSliderDragging && !relayCompSliderDragging &&
         dist(mouseX, mouseY, rcKnobX, rcY - 2 + sliderH/2) < knobSize) {
       relayCompSliderDragging = true;
     }
     if (relayCompSliderDragging) {
       relayCompensation = map(constrain(mouseX, rcSliderX, rcSliderX + sliderW), rcSliderX, rcSliderX + sliderW, 0.0, 30.0);
       relayCompensation = constrain(relayCompensation, 0.0, 30.0);
-      return;
-    }
-    
-    // Map alpha slider
-    float maSliderX = px + 130;
-    float brakeCheckY = rcY + 38;
-    float mapCheckY = brakeCheckY + 28;
-    float maY = mapCheckY + 32;
-    float maSliderW = 220;
-    float maKnobX = map(mapImageAlpha, 0.0, 1.0, maSliderX, maSliderX + maSliderW);
-    if (!smoothSliderDragging && !relayCompSliderDragging && !mapAlphaSliderDragging &&
-        showMapImage && dist(mouseX, mouseY, maKnobX, maY - 2 + sliderH/2) < knobSize) {
-      mapAlphaSliderDragging = true;
-    }
-    if (mapAlphaSliderDragging) {
-      mapImageAlpha = map(constrain(mouseX, maSliderX, maSliderX + maSliderW), maSliderX, maSliderX + maSliderW, 0.0, 1.0);
-      mapImageAlpha = constrain(mapImageAlpha, 0.0, 1.0);
       return;
     }
   }
@@ -2558,8 +2778,8 @@ void checkSettingsClick() {
   float px = 40, py = 60;
   
   // Tabs
-  float tabY = py + 45, tabW = 110, tabH = 32, gap = 10;
-  for (int i = 0; i < 3; i++) {
+  float tabY = py + 45, tabW = 120, tabH = 32, gap = 8;
+  for (int i = 0; i < 5; i++) {
     float tx = px + 20 + i * (tabW + gap);
     if (mouseX > tx && mouseX < tx + tabW && mouseY > tabY && mouseY < tabY + tabH) {
       currentSettingsTab = i;
@@ -2568,21 +2788,25 @@ void checkSettingsClick() {
     }
   }
   
-  if (currentSettingsTab == 0) checkAntennaSettingsClick(px, py + 90);
-  else if (currentSettingsTab == 1) checkConnectionSettingsClick(px, py + 90);
-  else if (currentSettingsTab == 2) checkSystemSettingsClick(px, py + 90);
+  if (currentSettingsTab == 0) checkConnectionSettingsClick(px, py + 90);
+  else if (currentSettingsTab == 1) checkAntennaSettingsClick(px, py + 90);
+  else if (currentSettingsTab == 2) checkMapSettingsClick(px, py + 90);
+  else if (currentSettingsTab == 3) checkLookSettingsClick(px, py + 90);
+  else if (currentSettingsTab == 4) checkPreferencesSettingsClick(px, py + 90);
   
-  // Salva/Annulla
-  float btnY = py + 350, centerX = px + 360, btnW = 100, btnH = 35;
-  
-  if (mouseX > centerX - btnW - 10 && mouseX < centerX - 10 && mouseY > btnY && mouseY < btnY + btnH) {
-    saveSettings();
-    return;
-  }
-  
-  if (mouseX > centerX + 10 && mouseX < centerX + btnW + 10 && mouseY > btnY && mouseY < btnY + btnH) {
-    cancelSettings();
-    return;
+  // Salva/Annulla (only visible and active for Antenne tab)
+  if (currentSettingsTab == 1) {
+    float btnY = py + 350, centerX = px + 360, btnW = 100, btnH = 35;
+    
+    if (mouseX > centerX - btnW - 10 && mouseX < centerX - 10 && mouseY > btnY && mouseY < btnY + btnH) {
+      saveSettings();
+      return;
+    }
+    
+    if (mouseX > centerX + 10 && mouseX < centerX + btnW + 10 && mouseY > btnY && mouseY < btnY + btnH) {
+      cancelSettings();
+      return;
+    }
   }
 }
 
@@ -2733,19 +2957,8 @@ void checkConnectionSettingsClick(float px, float py) {
     return;
   }
   
-  // Auto-connect
-  float autoY = rotBtnY + 45;
-  float checkX = px + 30;
-  float checkSize = 18;
-  if (mouseX > checkX && mouseX < checkX + checkSize + 200 && mouseY > autoY && mouseY < autoY + checkSize) {
-    autoConnect = !autoConnect;
-    addDebugLog("Auto-connect: " + (autoConnect ? "ON" : "OFF"));
-    addNotification("Auto-connect " + (autoConnect ? "attivato" : "disattivato"), autoConnect ? SUCCESS : INFO);
-    return;
-  }
-  
   // Scan Ports
-  float scanBtnY = autoY + 30;
+  float scanBtnY = rotBtnY + 30;
   if (mouseX > px + 30 && mouseX < px + 130 && mouseY > scanBtnY && mouseY < scanBtnY + 28) {
     scanSerialPorts();
     addNotification("Porte scansionate", INFO);
@@ -2753,47 +2966,145 @@ void checkConnectionSettingsClick(float px, float py) {
   }
 }
 
-void checkSystemSettingsClick(float px, float py) {
-  // Debug checkbox
-  if (mouseX > px + 30 && mouseX < px + 48 && mouseY > py + 40 && mouseY < py + 58) {
-    debugMode = !debugMode;
-    addDebugLog("Debug: " + (debugMode ? "ON" : "OFF"));
-    return;
-  }
+void checkMapSettingsClick(float px, float py) {
+  float size = 18;
   
-  // Calcola posizioni come in drawSystemSettings
-  float sfY = py + 85;
-  float rcY = sfY + 38;
-  float brakeCheckY = rcY + 38;
-  float mapCheckY = brakeCheckY + 28;
-  
-  // Mostra controllo Freno checkbox
-  if (mouseX > px + 30 && mouseX < px + 48 && mouseY > brakeCheckY && mouseY < brakeCheckY + 18) {
-    showBrakeControls = !showBrakeControls;
-    addDebugLog("Controllo Freno: " + (showBrakeControls ? "ON" : "OFF"));
-    settings.saveSettings();
-    addNotification("Freno " + (showBrakeControls ? "visibile" : "nascosto"), showBrakeControls ? SUCCESS : INFO);
-    return;
-  }
-  
-  // Mostra mappa checkbox
-  if (mouseX > px + 30 && mouseX < px + 48 && mouseY > mapCheckY && mouseY < mapCheckY + 18) {
+  // Mostra immagine mappa checkbox
+  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > py && mouseY < py + size) {
     showMapImage = !showMapImage;
-    addDebugLog("Mappa nel quadrante: " + (showMapImage ? "ON" : "OFF"));
     settings.saveSettings();
+    addDebugLog("Mappa quadrante: " + (showMapImage ? "ON" : "OFF"));
     return;
   }
   
-  // Carica Mappa button
-  float mapBtnX = px + 310, mapBtnY = mapCheckY;
-  if (mouseX > mapBtnX && mouseX < mapBtnX + 110 && mouseY > mapBtnY && mouseY < mapBtnY + 22) {
+  // Sfoglia button
+  float pathY = py + 28;
+  if (mouseX > px + 390 && mouseX < px + 460 && mouseY > pathY - 4 && mouseY < pathY + 18) {
     selectInput("Seleziona immagine mappa", "mapImageSelected");
     return;
   }
   
-  // Reset button
-  float btnY = py + 245;
-  if (mouseX > px + 30 && mouseX < px + 150 && mouseY > btnY && mouseY < btnY + 35) {
+  // Opacita mappa slider area handled by mouseDragged
+  
+  // Separator line
+  float maY = py + 70;
+  float chkY = maY + 35;
+  float rowH = 26;
+  
+  // Mostra controlli freno
+  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > chkY && mouseY < chkY + size) {
+    showBrakeControls = !showBrakeControls;
+    settings.saveSettings();
+    addDebugLog("Controllo Freno: " + (showBrakeControls ? "ON" : "OFF"));
+    addNotification("Freno " + (showBrakeControls ? "visibile" : "nascosto"), showBrakeControls ? SUCCESS : INFO);
+    return;
+  }
+  
+  // Mostra etichette gradi
+  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > chkY + rowH && mouseY < chkY + rowH + size) {
+    showDegreeLabels = !showDegreeLabels;
+    settings.saveSettings();
+    return;
+  }
+  
+  // Mostra cardinali
+  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > chkY + rowH * 2 && mouseY < chkY + rowH * 2 + size) {
+    showCardinals = !showCardinals;
+    settings.saveSettings();
+    return;
+  }
+  
+  // Mostra pattern antenna
+  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > chkY + rowH * 3 && mouseY < chkY + rowH * 3 + size) {
+    showBeamPattern = !showBeamPattern;
+    settings.saveSettings();
+    return;
+  }
+}
+
+void checkLookSettingsClick(float px, float py) {
+  float size = 18;
+  float themeBtnW = 130, themeBtnH = 34, themeBtnGap = 12;
+  float themeBtnY = py + 22;
+  
+  for (int i = 0; i < 3; i++) {
+    float tbx = px + 30 + i * (themeBtnW + themeBtnGap);
+    if (mouseX > tbx && mouseX < tbx + themeBtnW && mouseY > themeBtnY && mouseY < themeBtnY + themeBtnH) {
+      applyTheme(i);
+      settings.saveSettings();
+      addNotification("Tema applicato", SUCCESS);
+      return;
+    }
+  }
+  
+  float chkY = py + 84;
+  float rowH = 26;
+  
+  // Attiva animazioni
+  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > chkY && mouseY < chkY + size) {
+    showAnimations = !showAnimations;
+    settings.saveSettings();
+    return;
+  }
+  
+  // Mostra barra stato
+  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > chkY + rowH && mouseY < chkY + rowH + size) {
+    showStatusBarFlag = !showStatusBarFlag;
+    settings.saveSettings();
+    return;
+  }
+}
+
+void checkPreferencesSettingsClick(float px, float py) {
+  float size = 18;
+  float rowH = 22;
+  float y = py;
+  
+  // disconnectRelaysOnExit
+  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > y && mouseY < y + size) {
+    disconnectRelaysOnExit = !disconnectRelaysOnExit; settings.saveSettings(); return;
+  }
+  // sendHaltOnExit
+  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > y + rowH && mouseY < y + rowH + size) {
+    sendHaltOnExit = !sendHaltOnExit; settings.saveSettings(); return;
+  }
+  // confirmOnExit
+  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > y + rowH * 2 && mouseY < y + rowH * 2 + size) {
+    confirmOnExit = !confirmOnExit; settings.saveSettings(); return;
+  }
+  // autoConnect
+  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > y + rowH * 3 && mouseY < y + rowH * 3 + size) {
+    autoConnect = !autoConnect; settings.saveSettings();
+    addNotification("Auto-connect " + (autoConnect ? "attivato" : "disattivato"), autoConnect ? SUCCESS : INFO);
+    return;
+  }
+  // rememberLastAntenna
+  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > y + rowH * 4 && mouseY < y + rowH * 4 + size) {
+    rememberLastAntenna = !rememberLastAntenna; settings.saveSettings(); return;
+  }
+  // debugMode
+  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > y + rowH * 5 && mouseY < y + rowH * 5 + size) {
+    debugMode = !debugMode;
+    addDebugLog("Debug: " + (debugMode ? "ON" : "OFF"));
+    settings.saveSettings();
+    return;
+  }
+  
+  // Slider area handled by mouseDragged
+  float sepY = y + rowH * 6 + 6;
+  float sfY = sepY + 18;
+  float rcY = sfY + 35;
+  float btnY = rcY + 40;
+  
+  // Salva Preferenze
+  if (mouseX > px + 30 && mouseX < px + 160 && mouseY > btnY && mouseY < btnY + 32) {
+    settings.saveSettings();
+    addNotification("Preferenze salvate", SUCCESS);
+    return;
+  }
+  
+  // Reset Default
+  if (mouseX > px + 175 && mouseX < px + 305 && mouseY > btnY && mouseY < btnY + 32) {
     resetToDefaults();
     addNotification("Reset completato", WARNING);
     return;
@@ -3406,6 +3717,23 @@ void exit() {
   addDebugLog("Chiusura...");
   
   try {
+    if (disconnectRelaysOnExit && antConnected) {
+      sendAntennaCommand("ALLOFF");
+      addDebugLog("TX ANT: ALLOFF");
+      delay(100);
+    }
+    
+    if (sendHaltOnExit && rotConnected) {
+      sendRotatorCommand("HALT:1");
+      addDebugLog("TX ROT: HALT:1");
+      delay(100);
+    }
+    
+    if (rememberLastAntenna) {
+      lastSelectedAntenna = selectedAntenna;
+    }
+    
+    settings.saveSettings();
     disconnectAntESP32();
     disconnectRotESP32();
     delay(150);
