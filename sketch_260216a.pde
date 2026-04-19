@@ -1841,7 +1841,7 @@ void drawMapSettings(float px, float py) {
   textFont(fontRegular);
   textSize(10);
   textAlign(LEFT, CENTER);
-  text("Opacita mappa:", px + 30, maY + 2);
+  text("Opacit\u00e0 mappa:", px + 30, maY + 2);
   
   fill(theme.secondary);
   stroke(theme.border);
@@ -1928,7 +1928,7 @@ void drawPreferencesSettings(float px, float py) {
   drawCheckbox("Chiedi conferma prima di uscire", confirmOnExit, px + 30, y + rowH * 2);
   drawCheckbox("Auto-connetti all'avvio", autoConnect, px + 30, y + rowH * 3);
   drawCheckbox("Ricorda ultima antenna selezionata", rememberLastAntenna, px + 30, y + rowH * 4);
-  drawCheckbox("Modalita debug", debugMode, px + 30, y + rowH * 5);
+  drawCheckbox("Modalit\u00e0 debug", debugMode, px + 30, y + rowH * 5);
   
   // ── Separator ──────────────────────────────────────────────────────────
   float sepY = y + rowH * 6 + 6;
@@ -3062,25 +3062,34 @@ void checkPreferencesSettingsClick(float px, float py) {
   
   // disconnectRelaysOnExit
   if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > y && mouseY < y + size) {
-    disconnectRelaysOnExit = !disconnectRelaysOnExit; settings.saveSettings(); return;
+    disconnectRelaysOnExit = !disconnectRelaysOnExit;
+    settings.saveSettings();
+    return;
   }
   // sendHaltOnExit
   if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > y + rowH && mouseY < y + rowH + size) {
-    sendHaltOnExit = !sendHaltOnExit; settings.saveSettings(); return;
+    sendHaltOnExit = !sendHaltOnExit;
+    settings.saveSettings();
+    return;
   }
   // confirmOnExit
   if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > y + rowH * 2 && mouseY < y + rowH * 2 + size) {
-    confirmOnExit = !confirmOnExit; settings.saveSettings(); return;
+    confirmOnExit = !confirmOnExit;
+    settings.saveSettings();
+    return;
   }
   // autoConnect
   if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > y + rowH * 3 && mouseY < y + rowH * 3 + size) {
-    autoConnect = !autoConnect; settings.saveSettings();
+    autoConnect = !autoConnect;
+    settings.saveSettings();
     addNotification("Auto-connect " + (autoConnect ? "attivato" : "disattivato"), autoConnect ? SUCCESS : INFO);
     return;
   }
   // rememberLastAntenna
   if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > y + rowH * 4 && mouseY < y + rowH * 4 + size) {
-    rememberLastAntenna = !rememberLastAntenna; settings.saveSettings(); return;
+    rememberLastAntenna = !rememberLastAntenna;
+    settings.saveSettings();
+    return;
   }
   // debugMode
   if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > y + rowH * 5 && mouseY < y + rowH * 5 + size) {
