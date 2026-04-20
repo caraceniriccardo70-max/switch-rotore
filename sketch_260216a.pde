@@ -179,6 +179,11 @@ class SettingsManager {
     config.setBoolean("showDegreeLabels", true);
     config.setBoolean("showCardinals", true);
     config.setBoolean("showBeamPattern", true);
+    config.setFloat("beamPatternOpacity", 0.25);
+    config.setFloat("beamPatternBeamWidth", 50.0);
+    config.setFloat("mapZoom", 1.0);
+    config.setFloat("mapOffsetX", 0.0);
+    config.setFloat("mapOffsetY", 0.0);
     saveSettings();
   }
   
@@ -224,6 +229,11 @@ class SettingsManager {
       showDegreeLabels = config.getBoolean("showDegreeLabels", true);
       showCardinals = config.getBoolean("showCardinals", true);
       showBeamPattern = config.getBoolean("showBeamPattern", true);
+      beamPatternOpacity = config.getFloat("beamPatternOpacity", 0.25);
+      beamPatternBeamWidth = config.getFloat("beamPatternBeamWidth", 50.0);
+      mapZoom = config.getFloat("mapZoom", 1.0);
+      mapOffsetX = config.getFloat("mapOffsetX", 0.0);
+      mapOffsetY = config.getFloat("mapOffsetY", 0.0);
       
       if (currentThemeIdx != 0) applyTheme(currentThemeIdx);
     } catch (Exception e) { }
@@ -273,6 +283,11 @@ class SettingsManager {
       config.setBoolean("showDegreeLabels", showDegreeLabels);
       config.setBoolean("showCardinals", showCardinals);
       config.setBoolean("showBeamPattern", showBeamPattern);
+      config.setFloat("beamPatternOpacity", beamPatternOpacity);
+      config.setFloat("beamPatternBeamWidth", beamPatternBeamWidth);
+      config.setFloat("mapZoom", mapZoom);
+      config.setFloat("mapOffsetX", mapOffsetX);
+      config.setFloat("mapOffsetY", mapOffsetY);
       
       saveJSONObject(config, settingsFile);
     } catch (Exception e) { }
@@ -334,10 +349,8 @@ int brakeDelayMs = 500;
 int brakeDelayMin = 100;
 int brakeDelayMax = 3000;
 boolean brakeSliderDragging = false;
-float smoothingFactor = 0.15;       // EMA coefficient applied to received azimuth data
-float relayCompensation = 17.0;     // Relay compensation value (read from ESP32)
-boolean smoothSliderDragging = false;
-boolean relayCompSliderDragging = false;
+float smoothingFactor = 0.15;       // EMA coefficient - used internally, not shown in UI
+float relayCompensation = 17.0;     // Relay compensation - used internally, not shown in UI
 long lastHttpPoll = 0;
 int httpPollFailCount = 0;
 float targetAzimuth = -1;  // -1 = nessun target
@@ -368,6 +381,21 @@ boolean mapAlphaSliderDragging = false;
 
 // ─── Toggle visibilità controllo freno ──────────────────────────────────────
 boolean showBrakeControls = true;
+
+// ─── Pattern antenna avanzato ─────────────────────────────────────────────
+float beamPatternOpacity = 0.25;
+float beamPatternBeamWidth = 50.0;
+boolean beamOpacitySliderDragging = false;
+boolean beamWidthSliderDragging = false;
+
+// ─── Mappa zoom e offset ──────────────────────────────────────────────────
+float mapZoom = 1.0;
+float mapOffsetX = 0;
+float mapOffsetY = 0;
+boolean mapZoomSliderDragging = false;
+boolean mapOffsetXSliderDragging = false;
+boolean mapOffsetYSliderDragging = false;
+PImage sourceMapImage = null;
 
 // ─── Statistiche comunicazione HTTP ─────────────────────────────────────────
 int httpCommandCount = 0;
@@ -698,7 +726,7 @@ void drawRotatorPanel() {
   drawRotatorPowerSwitch(px + 20, py + 45);
   
   // Display azimuth digitale grande (a destra del power switch)
-  drawLargeAzimuthDisplay(px + 280, py + 42, pw - 310);
+  drawLargeAzimuthDisplay(px + 295, py + 42, pw - 325);
   
   drawAzimuthMap();
   drawRotatorButtons();
@@ -768,7 +796,16 @@ void drawLargeAzimuthDisplay(float x, float y, float w) {
   if (rotatorCW || rotatorCCW) {
     long elapsed = (millis() - rotationStartTime) / 1000;
     fill(rotatorCW ? theme.cwColor : theme.ccwColor);
-    text((rotatorCW ? "→ CW" : "← CCW") + "  " + elapsed + "s", x + w/2, y + h - 5);
+    text((rotatorCW ? "\u2192 CW" : "\u2190 CCW") + "  " + elapsed + "s", x + w/2, y + h - 5);
+  } else if (goToActive) {
+    fill(theme.warning);
+    text("\u2192 GOTO " + nf(goToTarget, 1, 0) + "\u00b0", x + w/2, y + h - 5);
+  } else if (overlapActive) {
+    fill(color(255, 140, 0));
+    text("OVERLAP", x + w/2, y + h - 5);
+  } else if (!rotatorPowerOn) {
+    fill(theme.disabled);
+    text("OFF", x + w/2, y + h - 5);
   }
 }
 
@@ -783,7 +820,6 @@ void drawAzimuthMap() {
     image(maskedMapImage, 0, 0);
     noTint();
   }
-  
   noFill();
   for (int i = 3; i >= 1; i--) {
     stroke(theme.border, 40 + i * 20);
@@ -865,14 +901,15 @@ void drawAzimuthMap() {
   
   if (selectedAntenna >= 0 && antennaDirective[selectedAntenna] && showBeamPattern) {
     float patternAngle = radians(displayAzimuth - 90);
-    float beamWidth = radians(50);
-    fill(theme.accent, 25);
-    stroke(theme.accent, 60);
+    float beamWidth = radians(beamPatternBeamWidth);
+    int bpAlpha = int(beamPatternOpacity * 255);
+    fill(theme.accent, max(5, bpAlpha / 4));
+    stroke(theme.accent, bpAlpha);
     strokeWeight(1);
     beginShape();
     vertex(0, 0);
     for (float a = patternAngle - beamWidth/2; a <= patternAngle + beamWidth/2; a += 0.05) {
-      vertex(cos(a) * mapRadius * 0.75, sin(a) * mapRadius * 0.75);
+      vertex(cos(a) * mapRadius, sin(a) * mapRadius);
     }
     endShape(CLOSE);
   }
@@ -938,53 +975,18 @@ void drawAzimuthMap() {
     ellipse(0, 0, 50, 50);
   }
   
+  // Small center pivot dot (no opaque overlay - keeps map visible)
   fill(theme.secondary);
   stroke(rotatorPowerOn ? theme.rotatorPowerOn : theme.border);
-  strokeWeight(2);
-  ellipse(0, 0, 65, 65);
-  
-  if (systemOn && rotatorPowerOn) {
-    fill(theme.accent, 30);
-    noStroke();
-    ellipse(0, 0, 75, 75);
-  }
-  
-  fill(systemOn && rotatorPowerOn ? (overlapActive ? color(255, 140, 0) : theme.accent) : theme.disabled);
-  textFont(fontBold);
-  textSize(16);
-  textAlign(CENTER, CENTER);
-  text(nf(displayAzimuth, 1, 1) + "\u00b0", 0, -5);
-  
-  fill(theme.textDim);
-  textSize(9);
-  String status = "STOP";
-  if (!rotatorPowerOn) status = "OFF";
-  else if (goToActive) status = "\u2192 GOTO " + nf(goToTarget, 1, 0) + "\u00b0";
-  else if (rotatorCW) status = "\u2192 CW";
-  else if (rotatorCCW) status = "\u2190 CCW";
-  text(status, 0, 12);
-  
-  // Display target azimuth if Go To is active
-  if (targetAzimuth >= 0) {
-    fill(theme.warning);
-    textSize(9);
-    text("TARGET: " + nf(targetAzimuth, 1, 1) + "\u00b0", 0, 24);
-  }
-  
-  // Indicatore OVERLAP nel centro del quadrante
-  if (overlapActive) {
-    fill(255, 140, 0);
-    textSize(9);
-    textFont(fontBold);
-    text("\u26a0 OVERLAP", 0, targetAzimuth >= 0 ? 36 : 24);
-  }
+  strokeWeight(1);
+  ellipse(0, 0, 10, 10);
   
   popMatrix();
 }
 
 void drawRotatorButtons() {
   float centerX = mapCenterX;
-  float btnY = mapCenterY + 155;
+  float btnY = mapCenterY + 170;
   float btnH = 38, gap = 8;
   
   boolean rotatorEnabled = systemOn && rotatorPowerOn;
@@ -995,37 +997,22 @@ void drawRotatorButtons() {
     float totalWidth = btnW * 4 + gap * 3;
     float startX = centerX - totalWidth / 2;
     
-    drawMomentaryButton("◄ CCW", startX, btnY, btnW, btnH, 20, ccwButtonPressed, theme.ccwColor, rotatorEnabled);
+    drawMomentaryButton("CCW", startX, btnY, btnW, btnH, 20, ccwButtonPressed, theme.ccwColor, rotatorEnabled);
     drawHaltButton("HALT", startX + btnW + gap, btnY, btnW, btnH, 23, rotatorEnabled);
     drawBrakeButton("FRENO", startX + (btnW + gap) * 2, btnY, btnW, btnH, 21, rotatorEnabled);
-    drawMomentaryButton("CW ►", startX + (btnW + gap) * 3, btnY, btnW, btnH, 22, cwButtonPressed, theme.cwColor, rotatorEnabled);
+    drawMomentaryButton("CW", startX + (btnW + gap) * 3, btnY, btnW, btnH, 22, cwButtonPressed, theme.cwColor, rotatorEnabled);
     
-    if (goToActive) {
-      drawHaltGotoButton(centerX, btnY + btnH + 15, btnW * 2 + gap, btnH);
-    }
-    drawBrakeDelaySlider(centerX, btnY + btnH + (goToActive ? 70 : 55));
+    drawBrakeDelaySlider(centerX, btnY + btnH + 55);
     
   } else {
-    // Layout 3 pulsanti senza freno: CCW | HALT | CW (stessa larghezza totale del layout a 4 per coerenza visiva)
-    float totalWidth = 60.0 * 4 + gap * 3; // larghezza totale invariata = 264px
+    // Layout 3 pulsanti senza freno
+    float totalWidth = 60.0 * 4 + gap * 3;
     float btnW = (totalWidth - gap * 2) / 3;
     float startX = centerX - totalWidth / 2;
     
-    drawMomentaryButton("◄ CCW", startX, btnY, btnW, btnH, 20, ccwButtonPressed, theme.ccwColor, rotatorEnabled);
+    drawMomentaryButton("CCW", startX, btnY, btnW, btnH, 20, ccwButtonPressed, theme.ccwColor, rotatorEnabled);
     drawHaltButton("HALT", startX + btnW + gap, btnY, btnW, btnH, 23, rotatorEnabled);
-    drawMomentaryButton("CW ►", startX + (btnW + gap) * 2, btnY, btnW, btnH, 22, cwButtonPressed, theme.cwColor, rotatorEnabled);
-    
-    if (goToActive) {
-      drawHaltGotoButton(centerX, btnY + btnH + 15, totalWidth / 2, btnH);
-    }
-    
-    // Solo smooth e relay comp (senza brake delay)
-    fill(theme.textDim);
-    textFont(fontRegular);
-    textSize(9);
-    textAlign(CENTER, TOP);
-    text("Smooth: " + nf(smoothingFactor, 1, 2) + "  |  RelayComp: " + nf(relayCompensation, 1, 1) + "\u00b0",
-         centerX, btnY + btnH + (goToActive ? 70 : 15));
+    drawMomentaryButton("CW", startX + (btnW + gap) * 2, btnY, btnW, btnH, 22, cwButtonPressed, theme.cwColor, rotatorEnabled);
   }
 }
 
@@ -1176,43 +1163,6 @@ void drawHaltButton(String label, float x, float y, float w, float h, int idx, b
   noStroke();
   rect(x, y, w, h, 8);
   
-  if (enabled) {
-    // Use clipping to keep stripes within rounded rectangle
-    pushMatrix();
-    // Create clipping by drawing stripes only within bounds
-    for (float stripeOffset = -h; stripeOffset < w + h; stripeOffset += 8) {
-      // Calculate stripe line endpoints
-      float x1 = x + stripeOffset;
-      float y1 = y;
-      float x2 = x + stripeOffset + h;
-      float y2 = y + h;
-      
-      // Clip stripe to rounded rectangle bounds
-      stroke(color(180, 0, 0), 120);
-      strokeWeight(2);
-      
-      // Manual clipping to stay within button bounds
-      if (x1 < x) {
-        float ratio = (x - x1) / (x2 - x1);
-        y1 = y1 + ratio * (y2 - y1);
-        x1 = x;
-      }
-      if (x2 > x + w) {
-        float ratio = (x + w - x1) / (x2 - x1);
-        y2 = y1 + ratio * (y2 - y1);
-        x2 = x + w;
-      }
-      if (y1 < y) y1 = y;
-      if (y2 > y + h) y2 = y + h;
-      
-      // Only draw if line is within bounds
-      if (x1 >= x && x2 <= x + w && y1 >= y && y2 <= y + h) {
-        line(x1, y1, x2, y2);
-      }
-    }
-    popMatrix();
-  }
-  
   // Border
   noFill();
   stroke(theme.haltColor);
@@ -1237,31 +1187,6 @@ void drawHaltButton(String label, float x, float y, float w, float h, int idx, b
   text(label, x + w/2, y + h/2);
   
   popMatrix();
-}
-
-void drawHaltGotoButton(float x, float y, float w, float h) {
-  // Blinking effect
-  float blinkAlpha = 150 + 105 * sin(millis() * 0.008);
-  
-  // Shadow
-  fill(0, 0, 0, 80);
-  noStroke();
-  rect(x - w/2 + 2, y + 3, w, h, 8);
-  
-  // Background
-  fill(theme.haltColor, blinkAlpha);
-  stroke(theme.haltColor);
-  strokeWeight(2);
-  rect(x - w/2, y, w, h, 8);
-  
-  // Text
-  fill(theme.text);
-  textFont(fontBold);
-  textSize(10);
-  textAlign(CENTER, CENTER);
-  text("HALT GOTO", x, y + h/2 - 6);
-  textSize(8);
-  text("Target: " + nf(goToTarget, 1, 0) + "°", x, y + h/2 + 6);
 }
 
 void drawBrakeDelaySlider(float x, float y) {
@@ -1318,57 +1243,6 @@ void drawBrakeDelaySlider(float x, float y) {
   fill(brakeReleased ? theme.success : theme.warning);
   textSize(8);
   text(brakeReleased ? "BRAKE FREE" : "BRAKE ON", x, y + 28);
-  
-  // Compact smooth & relay comp display
-  fill(theme.textDim);
-  textFont(fontRegular);
-  textSize(8);
-  textAlign(CENTER, TOP);
-  text("Smooth: " + nf(smoothingFactor, 1, 2) + "  |  RelayComp: " + nf(relayCompensation, 1, 1) + "\u00b0", x, y + 40);
-}
-
-void drawSmoothingSlider(float x, float y) {
-  // Smooth factor slider for direct panel use
-  float sliderW = 200, sliderH = 4, knobSize = 14;
-  float sliderX = x - sliderW / 2;
-  
-  fill(theme.textDim);
-  textFont(fontRegular);
-  textSize(9);
-  textAlign(CENTER, TOP);
-  text("Smoothing", x, y - 18);
-  
-  fill(theme.secondary);
-  stroke(theme.border);
-  strokeWeight(1);
-  rect(sliderX, y, sliderW, sliderH, 2);
-  
-  float knobX = map(smoothingFactor, 0.01, 1.0, sliderX, sliderX + sliderW);
-  boolean hoverKnob = dist(mouseX, mouseY, knobX, y + sliderH/2) < knobSize;
-  
-  if (hoverKnob || smoothSliderDragging) {
-    fill(theme.accent, 60);
-    noStroke();
-    ellipse(knobX, y + sliderH/2, knobSize + 8, knobSize + 8);
-  }
-  fill(smoothSliderDragging ? theme.accent : theme.text);
-  stroke(theme.accent);
-  strokeWeight(2);
-  ellipse(knobX, y + sliderH/2, knobSize, knobSize);
-  
-  fill(theme.text);
-  textFont(fontBold);
-  textSize(10);
-  textAlign(CENTER, TOP);
-  text(nf(smoothingFactor, 1, 2), x, y + 15);
-}
-
-void drawRelayCompDisplay(float x, float y) {
-  fill(theme.textDim);
-  textFont(fontRegular);
-  textSize(9);
-  textAlign(CENTER, TOP);
-  text("Relay Comp: " + nf(relayCompensation, 1, 1) + "\u00b0", x, y);
 }
 
 void drawStatusBar() {
@@ -1642,19 +1516,20 @@ void drawConnectionSettings(float px, float py) {
       }
     }
   } else {
-    // WiFi Mode - Show IP and Port as editable fields
+    // WiFi Mode - Show IP and Port as editable fields (labels LEFT of field)
+    float ipLabelW = 22;
     fill(theme.textDim);
     textFont(fontRegular);
-    textSize(9);
-    textAlign(LEFT, CENTER);
-    text("IP:", px + 30, configY - 10);
-    text("Porta:", px + 200, configY - 10);
+    textSize(10);
+    textAlign(RIGHT, CENTER);
+    text("IP:", px + 30 + ipLabelW, configY + 13);
+    text("Porta:", px + 230, configY + 13);
     
     // IP field
-    drawTextField(px + 30, configY, 150, 26, 20, antWifiIP, "192.168.1.100");
+    drawTextField(px + 56, configY, 130, 26, 20, antWifiIP, "192.168.1.100");
     
     // Port field
-    drawTextField(px + 200, configY, 80, 26, 21, str(antWifiPort), "8080");
+    drawTextField(px + 238, configY, 70, 26, 21, str(antWifiPort), "8080");
   }
   
   // Connect/Disconnect Button
@@ -1738,19 +1613,19 @@ void drawConnectionSettings(float px, float py) {
       }
     }
   } else {
-    // WiFi Mode - Show IP and Port as editable fields
+    // WiFi Mode - Show IP and Port as editable fields (labels LEFT of field)
     fill(theme.textDim);
     textFont(fontRegular);
-    textSize(9);
-    textAlign(LEFT, CENTER);
-    text("IP:", px + 30, rotConfigY - 10);
-    text("Porta:", px + 200, rotConfigY - 10);
+    textSize(10);
+    textAlign(RIGHT, CENTER);
+    text("IP:", px + 52, rotConfigY + 13);
+    text("Porta:", px + 230, rotConfigY + 13);
     
     // IP field
-    drawTextField(px + 30, rotConfigY, 150, 26, 22, rotWifiIP, "192.168.1.101");
+    drawTextField(px + 56, rotConfigY, 130, 26, 22, rotWifiIP, "192.168.1.101");
     
     // Port field
-    drawTextField(px + 200, rotConfigY, 80, 26, 23, str(rotWifiPort), "8081");
+    drawTextField(px + 238, rotConfigY, 70, 26, 23, str(rotWifiPort), "8081");
   }
   
   // Connect/Disconnect Button
@@ -1775,8 +1650,8 @@ void drawConnectionSettings(float px, float py) {
   noStroke();
   ellipse(ledX, rotBtnY + 16, 10, 10);
   
-  // Scan Ports Button
-  float scanBtnY = rotBtnY + 30;
+  // Scan Ports Button (moved lower to avoid collision with Disconnetti)
+  float scanBtnY = rotBtnY + 50;
   boolean scanHover = mouseX > px + 30 && mouseX < px + 130 && mouseY > scanBtnY && mouseY < scanBtnY + 28;
   fill(scanHover ? lerpColor(theme.warning, theme.text, 0.2) : theme.warning);
   stroke(theme.warning);
@@ -1804,37 +1679,49 @@ void drawMapSettings(float px, float py) {
   fill(theme.panel);
   stroke(theme.border);
   strokeWeight(1);
-  float pathFieldX = px + 130, pathFieldW = 250, pathFieldH = 22;
+  float pathFieldX = px + 130, pathFieldW = 220, pathFieldH = 22;
   rect(pathFieldX, pathY - 4, pathFieldW, pathFieldH, 4);
   
   String dispPath = mapImagePath.length() == 0 ? "(nessun file)" :
-    (mapImagePath.length() > 35 ? "..." + mapImagePath.substring(mapImagePath.length() - 32) : mapImagePath);
+    (mapImagePath.length() > 30 ? "..." + mapImagePath.substring(mapImagePath.length() - 27) : mapImagePath);
   fill(mapImagePath.length() == 0 ? theme.textDim : theme.text);
   textFont(fontRegular);
   textSize(9);
   textAlign(LEFT, CENTER);
   text(dispPath, pathFieldX + 5, pathY + 7);
   
-  boolean sfogliaHover = mouseX > px + 390 && mouseX < px + 460 && mouseY > pathY - 4 && mouseY < pathY + 18;
+  // Sfoglia PNG/JPG button
+  boolean sfogliaHover = mouseX > px + 360 && mouseX < px + 420 && mouseY > pathY - 4 && mouseY < pathY + 18;
   fill(sfogliaHover ? lerpColor(theme.accent, theme.text, 0.2) : theme.accent);
   stroke(theme.accent);
-  rect(px + 390, pathY - 4, 70, 22, 6);
+  rect(px + 360, pathY - 4, 60, 22, 6);
   fill(theme.primary);
   textFont(fontBold);
   textSize(9);
   textAlign(CENTER, CENTER);
-  text("Sfoglia", px + 425, pathY + 7);
+  text("Sfoglia", px + 390, pathY + 7);
+  
+  // PDF info button
+  boolean pdfHover = mouseX > px + 428 && mouseX < px + 488 && mouseY > pathY - 4 && mouseY < pathY + 18;
+  fill(pdfHover ? lerpColor(theme.warning, theme.text, 0.2) : theme.warning);
+  stroke(theme.warning);
+  rect(px + 428, pathY - 4, 60, 22, 6);
+  fill(theme.primary);
+  textFont(fontBold);
+  textSize(9);
+  textAlign(CENTER, CENTER);
+  text("PDF...", px + 458, pathY + 7);
   
   if (mapImagePath.length() > 0) {
     fill(maskedMapImage != null ? theme.success : theme.error);
     textFont(fontRegular);
     textSize(9);
     textAlign(LEFT, CENTER);
-    text((maskedMapImage != null ? "(OK) " : "(ERR) ") + (mapImagePath.length() > 30 ? mapImagePath.substring(mapImagePath.length() - 27) : mapImagePath), px + 30, pathY + 29);
+    text((maskedMapImage != null ? "(OK)" : "(ERR)"), px + 30, pathY + 29);
   }
   
   // ── Opacita mappa ──────────────────────────────────────────────────────
-  float maY = py + 70;
+  float maY = py + 68;
   float maSliderX = px + 170, maSliderW = 200, maSliderH = 4, maKnobSize = 14;
   
   fill(showMapImage ? theme.textDim : color(red(theme.textDim), green(theme.textDim), blue(theme.textDim), 80));
@@ -1863,18 +1750,169 @@ void drawMapSettings(float px, float py) {
   textAlign(LEFT, CENTER);
   text(int(mapImageAlpha * 100) + "%", maSliderX + maSliderW + 10, maY + 2);
   
+  // ── Zoom mappa ─────────────────────────────────────────────────────────
+  float zY = maY + 22;
+  float zSliderX = px + 170, zSliderW = 200, zSliderH = 4, zKnobSize = 14;
+  
+  fill(theme.textDim);
+  textFont(fontRegular);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text("Zoom mappa:", px + 30, zY + 2);
+  
+  fill(theme.secondary);
+  stroke(theme.border);
+  strokeWeight(1);
+  rect(zSliderX, zY - 2, zSliderW, zSliderH, 2);
+  
+  float zKnobX = map(mapZoom, 0.5, 2.5, zSliderX, zSliderX + zSliderW);
+  boolean zHover = dist(mouseX, mouseY, zKnobX, zY - 2 + zSliderH/2) < zKnobSize;
+  if (zHover || mapZoomSliderDragging) {
+    fill(theme.accent, 60); noStroke(); ellipse(zKnobX, zY - 2 + zSliderH/2, zKnobSize + 8, zKnobSize + 8);
+  }
+  fill(mapZoomSliderDragging ? theme.accent : theme.text);
+  stroke(theme.accent);
+  strokeWeight(2);
+  ellipse(zKnobX, zY - 2 + zSliderH/2, zKnobSize, zKnobSize);
+  fill(theme.text);
+  textFont(fontBold);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text(nf(mapZoom, 1, 1) + "x", zSliderX + zSliderW + 10, zY + 2);
+  
+  // ── Offset X ───────────────────────────────────────────────────────────
+  float oxY = zY + 22;
+  float oxSliderX = px + 170, oxSliderW = 160, oxSliderH = 4, oxKnobSize = 14;
+  
+  fill(theme.textDim);
+  textFont(fontRegular);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text("Offset X:", px + 30, oxY + 2);
+  
+  fill(theme.secondary);
+  stroke(theme.border);
+  strokeWeight(1);
+  rect(oxSliderX, oxY - 2, oxSliderW, oxSliderH, 2);
+  
+  float oxKnobX = map(mapOffsetX, -100, 100, oxSliderX, oxSliderX + oxSliderW);
+  boolean oxHover = dist(mouseX, mouseY, oxKnobX, oxY - 2 + oxSliderH/2) < oxKnobSize;
+  if (oxHover || mapOffsetXSliderDragging) {
+    fill(theme.accent, 60); noStroke(); ellipse(oxKnobX, oxY - 2 + oxSliderH/2, oxKnobSize + 8, oxKnobSize + 8);
+  }
+  fill(mapOffsetXSliderDragging ? theme.accent : theme.text);
+  stroke(theme.accent);
+  strokeWeight(2);
+  ellipse(oxKnobX, oxY - 2 + oxSliderH/2, oxKnobSize, oxKnobSize);
+  fill(theme.text);
+  textFont(fontBold);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text(int(mapOffsetX) + "px", oxSliderX + oxSliderW + 10, oxY + 2);
+  
+  // ── Offset Y ───────────────────────────────────────────────────────────
+  float oyY = oxY + 22;
+  float oySliderX = px + 170, oySliderW = 160, oySliderH = 4, oyKnobSize = 14;
+  
+  fill(theme.textDim);
+  textFont(fontRegular);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text("Offset Y:", px + 30, oyY + 2);
+  
+  fill(theme.secondary);
+  stroke(theme.border);
+  strokeWeight(1);
+  rect(oySliderX, oyY - 2, oySliderW, oySliderH, 2);
+  
+  float oyKnobX = map(mapOffsetY, -100, 100, oySliderX, oySliderX + oySliderW);
+  boolean oyHover = dist(mouseX, mouseY, oyKnobX, oyY - 2 + oySliderH/2) < oyKnobSize;
+  if (oyHover || mapOffsetYSliderDragging) {
+    fill(theme.accent, 60); noStroke(); ellipse(oyKnobX, oyY - 2 + oySliderH/2, oyKnobSize + 8, oyKnobSize + 8);
+  }
+  fill(mapOffsetYSliderDragging ? theme.accent : theme.text);
+  stroke(theme.accent);
+  strokeWeight(2);
+  ellipse(oyKnobX, oyY - 2 + oySliderH/2, oyKnobSize, oyKnobSize);
+  fill(theme.text);
+  textFont(fontBold);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text(int(mapOffsetY) + "px", oySliderX + oySliderW + 10, oyY + 2);
+  
+  // Reset offset button (rect: px+360 to px+440, oxY-2 to oxY+40)
+  boolean resetOfsHover = mouseX > px + 360 && mouseX < px + 440 && mouseY > oxY - 2 && mouseY < oxY + 40;
+  fill(resetOfsHover ? lerpColor(theme.warning, theme.text, 0.2) : theme.warning);
+  stroke(theme.warning);
+  rect(px + 360, oxY - 2, 80, 42, 6);
+  fill(theme.primary);
+  textFont(fontBold);
+  textSize(9);
+  textAlign(CENTER, CENTER);
+  text("Reset Pos", px + 400, oxY + 19);
+  
   // ── Separator ──────────────────────────────────────────────────────────
+  float sepY = oyY + 28;
   stroke(theme.border, 80);
   strokeWeight(1);
-  line(px + 30, maY + 22, px + 680, maY + 22);
+  line(px + 30, sepY, px + 680, sepY);
   
   // ── Checkboxes visibilita ──────────────────────────────────────────────
-  float chkY = maY + 35;
+  float chkY = sepY + 10;
   float rowH = 26;
   drawCheckbox("Mostra controlli freno", showBrakeControls, px + 30, chkY);
   drawCheckbox("Mostra etichette gradi", showDegreeLabels, px + 30, chkY + rowH);
   drawCheckbox("Mostra punti cardinali (N/E/S/W)", showCardinals, px + 30, chkY + rowH * 2);
   drawCheckbox("Mostra pattern antenna direttiva", showBeamPattern, px + 30, chkY + rowH * 3);
+  
+  // ── Pattern beam opacity and width ───────────────────────────────────
+  float bpY = chkY + rowH * 4 + 8;
+  fill(theme.textDim);
+  textFont(fontRegular);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text("Opacit\u00e0 pattern:", px + 30, bpY + 2);
+  float bpSliderX = px + 165, bpSliderW = 150, bpSliderH = 4, bpKnobSize = 14;
+  fill(theme.secondary);
+  stroke(theme.border);
+  strokeWeight(1);
+  rect(bpSliderX, bpY - 2, bpSliderW, bpSliderH, 2);
+  float bpKnobX = map(beamPatternOpacity, 0.0, 1.0, bpSliderX, bpSliderX + bpSliderW);
+  boolean bpHover = dist(mouseX, mouseY, bpKnobX, bpY - 2 + bpSliderH/2) < bpKnobSize;
+  if (bpHover || beamOpacitySliderDragging) { fill(theme.accent, 60); noStroke(); ellipse(bpKnobX, bpY - 2 + bpSliderH/2, bpKnobSize + 8, bpKnobSize + 8); }
+  fill(beamOpacitySliderDragging ? theme.accent : theme.text);
+  stroke(theme.accent);
+  strokeWeight(2);
+  ellipse(bpKnobX, bpY - 2 + bpSliderH/2, bpKnobSize, bpKnobSize);
+  fill(theme.text);
+  textFont(fontBold);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text(int(beamPatternOpacity * 100) + "%", bpSliderX + bpSliderW + 10, bpY + 2);
+  
+  float bwY = bpY + 22;
+  fill(theme.textDim);
+  textFont(fontRegular);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text("Apertura beam:", px + 30, bwY + 2);
+  float bwSliderX = px + 165, bwSliderW = 150, bwSliderH = 4, bwKnobSize = 14;
+  fill(theme.secondary);
+  stroke(theme.border);
+  strokeWeight(1);
+  rect(bwSliderX, bwY - 2, bwSliderW, bwSliderH, 2);
+  float bwKnobX = map(beamPatternBeamWidth, 10.0, 120.0, bwSliderX, bwSliderX + bwSliderW);
+  boolean bwHover = dist(mouseX, mouseY, bwKnobX, bwY - 2 + bwSliderH/2) < bwKnobSize;
+  if (bwHover || beamWidthSliderDragging) { fill(theme.accent, 60); noStroke(); ellipse(bwKnobX, bwY - 2 + bwSliderH/2, bwKnobSize + 8, bwKnobSize + 8); }
+  fill(beamWidthSliderDragging ? theme.accent : theme.text);
+  stroke(theme.accent);
+  strokeWeight(2);
+  ellipse(bwKnobX, bwY - 2 + bwSliderH/2, bwKnobSize, bwKnobSize);
+  fill(theme.text);
+  textFont(fontBold);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text(int(beamPatternBeamWidth) + "\u00b0", bwSliderX + bwSliderW + 10, bwY + 2);
 }
 
 void drawLookSettings(float px, float py) {
@@ -1936,65 +1974,8 @@ void drawPreferencesSettings(float px, float py) {
   strokeWeight(1);
   line(px + 30, sepY, px + 680, sepY);
   
-  // ── Smoothing factor slider ─────────────────────────────────────────────
-  float sliderW = 200, sliderH = 4, knobSize = 14;
-  float sfY = sepY + 18;
-  float sfSliderX = px + 170;
-  
-  fill(theme.textDim);
-  textFont(fontRegular);
-  textSize(10);
-  textAlign(LEFT, CENTER);
-  text("Smooth Factor:", px + 30, sfY + 2);
-  
-  fill(theme.secondary);
-  stroke(theme.border);
-  strokeWeight(1);
-  rect(sfSliderX, sfY - 2, sliderW, sliderH, 2);
-  
-  float sfKnobX = map(smoothingFactor, 0.01, 1.0, sfSliderX, sfSliderX + sliderW);
-  boolean sfHover = dist(mouseX, mouseY, sfKnobX, sfY - 2 + sliderH/2) < knobSize;
-  if (sfHover || smoothSliderDragging) { fill(theme.accent, 60); noStroke(); ellipse(sfKnobX, sfY - 2 + sliderH/2, knobSize + 8, knobSize + 8); }
-  fill(smoothSliderDragging ? theme.accent : theme.text);
-  stroke(theme.accent);
-  strokeWeight(2);
-  ellipse(sfKnobX, sfY - 2 + sliderH/2, knobSize, knobSize);
-  fill(theme.text);
-  textFont(fontBold);
-  textSize(10);
-  textAlign(LEFT, CENTER);
-  text(nf(smoothingFactor, 1, 2), sfSliderX + sliderW + 10, sfY + 2);
-  
-  // ── Relay compensation slider ───────────────────────────────────────────
-  float rcY = sfY + 35;
-  float rcSliderX = px + 170;
-  
-  fill(theme.textDim);
-  textFont(fontRegular);
-  textSize(10);
-  textAlign(LEFT, CENTER);
-  text("Relay Comp (\u00b0):", px + 30, rcY + 2);
-  
-  fill(theme.secondary);
-  stroke(theme.border);
-  strokeWeight(1);
-  rect(rcSliderX, rcY - 2, sliderW, sliderH, 2);
-  
-  float rcKnobX = map(relayCompensation, 0, 30, rcSliderX, rcSliderX + sliderW);
-  boolean rcHover = dist(mouseX, mouseY, rcKnobX, rcY - 2 + sliderH/2) < knobSize;
-  if (rcHover || relayCompSliderDragging) { fill(theme.warning, 60); noStroke(); ellipse(rcKnobX, rcY - 2 + sliderH/2, knobSize + 8, knobSize + 8); }
-  fill(relayCompSliderDragging ? theme.warning : theme.text);
-  stroke(theme.warning);
-  strokeWeight(2);
-  ellipse(rcKnobX, rcY - 2 + sliderH/2, knobSize, knobSize);
-  fill(theme.text);
-  textFont(fontBold);
-  textSize(10);
-  textAlign(LEFT, CENTER);
-  text(nf(relayCompensation, 1, 1) + "\u00b0", rcSliderX + sliderW + 10, rcY + 2);
-  
   // ── Pulsanti Salva/Reset ────────────────────────────────────────────────
-  float btnY = rcY + 40;
+  float btnY = sepY + 20;
   boolean savePrefHover = mouseX > px + 30 && mouseX < px + 160 && mouseY > btnY && mouseY < btnY + 32;
   fill(savePrefHover ? lerpColor(theme.success, theme.text, 0.2) : theme.success);
   stroke(theme.success);
@@ -2249,7 +2230,7 @@ void drawTopBar() {
   textSize(9);
   text("v" + APP_VERSION, 195, 22);
   
-  float ledX = width - 250;
+  float ledX = width - 310;
   float pulse = 0.5 + 0.5 * sin(millis() * 0.005);
   
   // ANT LED
@@ -2261,16 +2242,16 @@ void drawTopBar() {
   textFont(fontRegular);
   textSize(10);
   textAlign(LEFT, CENTER);
-  text("ANT: " + (antConnected ? "Connesso" : "Disc."), ledX + 12, 22);
+  text("ANT: " + (antConnected ? "OK" : "Disc."), ledX + 12, 22);
   
   // ROT LED
-  float ledX2 = ledX + 100;
+  float ledX2 = ledX + 120;
   fill(rotConnected ? lerpColor(theme.success, color(255), pulse * 0.3) : theme.error);
   noStroke();
   ellipse(ledX2, 22, 10, 10);
   
   fill(theme.text);
-  text("ROT: " + (rotConnected ? "Connesso" : "Disc."), ledX2 + 12, 22);
+  text("ROT: " + (rotConnected ? "OK" : "Disc."), ledX2 + 12, 22);
   
   drawPowerSwitch(width - 75, 12);
 }
@@ -2380,41 +2361,43 @@ void mouseReleased() {
     deactivateRotatorRelays();
   }
   
-  // Send commands when sliders finish dragging
+  // Send command when brake delay slider finishes dragging
   if (brakeSliderDragging) {
     sendRotatorCommand("DELAY:" + brakeDelayMs);
-  }
-  if (smoothSliderDragging) {
-    sendRotatorCommand("SMOOTH:" + nf(smoothingFactor, 1, 2));
-  }
-  if (relayCompSliderDragging) {
-    sendRotatorCommand("RELAYCOMP:" + nf(relayCompensation, 1, 1));
   }
   
   // Stop all slider dragging
   brakeSliderDragging = false;
-  smoothSliderDragging = false;
-  relayCompSliderDragging = false;
-  if (mapAlphaSliderDragging) {
+  if (mapAlphaSliderDragging || mapZoomSliderDragging || mapOffsetXSliderDragging || mapOffsetYSliderDragging) {
     settings.saveSettings();
+    if (mapZoomSliderDragging || mapOffsetXSliderDragging || mapOffsetYSliderDragging) {
+      rebuildMaskedMap();
+    }
   }
   mapAlphaSliderDragging = false;
+  mapZoomSliderDragging = false;
+  mapOffsetXSliderDragging = false;
+  mapOffsetYSliderDragging = false;
+  if (beamOpacitySliderDragging || beamWidthSliderDragging) {
+    settings.saveSettings();
+  }
+  beamOpacitySliderDragging = false;
+  beamWidthSliderDragging = false;
 }
 
 void mouseDragged() {
-  // Handle sliders in rotator panel (screen 0)
+  // Handle brake delay slider in rotator panel (screen 0, showBrakeControls)
   if (currentScreen == 0 && showBrakeControls) {
     float centerX = mapCenterX;
-    float btnY = mapCenterY + 155;
+    float btnY = mapCenterY + 170;
     float btnH = 38;
-    float brakeSliderY = btnY + btnH + (goToActive ? 70 : 55);
+    float brakeSliderY = btnY + btnH + 55;
     float sliderW = 200, sliderH = 4, sliderX = centerX - sliderW / 2;
     float knobSize = 14;
     
     // Brake delay knob
     float brakeKnobX = map(brakeDelayMs, brakeDelayMin, brakeDelayMax, sliderX, sliderX + sliderW);
-    if (!brakeSliderDragging && !smoothSliderDragging &&
-        dist(mouseX, mouseY, brakeKnobX, brakeSliderY + sliderH/2) < knobSize) {
+    if (!brakeSliderDragging && dist(mouseX, mouseY, brakeKnobX, brakeSliderY + sliderH/2) < knobSize) {
       brakeSliderDragging = true;
     }
     if (brakeSliderDragging) {
@@ -2425,17 +2408,21 @@ void mouseDragged() {
     }
   }
   
-  // Handle sliders in Mappa settings (screen 1, tab 2) - map alpha
+  // Handle sliders in Mappa settings (screen 1, tab 2)
   if (currentScreen == 1 && currentSettingsTab == 2) {
     float px = 40;
-    float contentY = 60 + 90; // py=60, content starts at py+90=150
-    float maY = contentY + 70;
-    float maSliderX = px + 170;
-    float maSliderW = 200, maSliderH = 4, maKnobSize = 14;
+    float contentY = 60 + 90;
+    float maY = contentY + 68;
+    float zY = maY + 22;
+    float oxY = zY + 22;
+    float oyY = oxY + 22;
     
+    // Map alpha slider
+    float maSliderX = px + 170, maSliderW = 200, maSliderH = 4, maKnobSize = 14;
     float maKnobX = map(mapImageAlpha, 0.0, 1.0, maSliderX, maSliderX + maSliderW);
-    if (!mapAlphaSliderDragging && showMapImage &&
-        dist(mouseX, mouseY, maKnobX, maY - 2 + maSliderH/2) < maKnobSize) {
+    if (!mapAlphaSliderDragging && !mapZoomSliderDragging && !mapOffsetXSliderDragging && !mapOffsetYSliderDragging
+        && !beamOpacitySliderDragging && !beamWidthSliderDragging && showMapImage
+        && dist(mouseX, mouseY, maKnobX, maY - 2 + maSliderH/2) < maKnobSize) {
       mapAlphaSliderDragging = true;
     }
     if (mapAlphaSliderDragging) {
@@ -2443,41 +2430,79 @@ void mouseDragged() {
       mapImageAlpha = constrain(mapImageAlpha, 0.0, 1.0);
       return;
     }
-  }
-  
-  // Handle sliders in Preferenze settings (screen 1, tab 4)
-  if (currentScreen == 1 && currentSettingsTab == 4) {
-    float px = 40;
-    float contentY = 60 + 90; // 150
-    float rowH = 22;
-    float sepY = contentY + rowH * 6 + 6;
-    float sliderW = 200, sliderH = 4, knobSize = 14;
-    float sfY = sepY + 18;
-    float sfSliderX = px + 170;
-    float rcY = sfY + 35;
-    float rcSliderX = px + 170;
     
-    // Smooth factor knob
-    float sfKnobX = map(smoothingFactor, 0.01, 1.0, sfSliderX, sfSliderX + sliderW);
-    if (!smoothSliderDragging && !relayCompSliderDragging &&
-        dist(mouseX, mouseY, sfKnobX, sfY - 2 + sliderH/2) < knobSize) {
-      smoothSliderDragging = true;
+    // Map zoom slider
+    float zSliderX = px + 170, zSliderW = 200, zSliderH = 4, zKnobSize = 14;
+    float zKnobX = map(mapZoom, 0.5, 2.5, zSliderX, zSliderX + zSliderW);
+    if (!mapAlphaSliderDragging && !mapZoomSliderDragging && !mapOffsetXSliderDragging && !mapOffsetYSliderDragging
+        && !beamOpacitySliderDragging && !beamWidthSliderDragging
+        && dist(mouseX, mouseY, zKnobX, zY - 2 + zSliderH/2) < zKnobSize) {
+      mapZoomSliderDragging = true;
     }
-    if (smoothSliderDragging) {
-      smoothingFactor = map(constrain(mouseX, sfSliderX, sfSliderX + sliderW), sfSliderX, sfSliderX + sliderW, 0.01, 1.0);
-      smoothingFactor = constrain(smoothingFactor, 0.01, 1.0);
+    if (mapZoomSliderDragging) {
+      mapZoom = map(constrain(mouseX, zSliderX, zSliderX + zSliderW), zSliderX, zSliderX + zSliderW, 0.5, 2.5);
+      mapZoom = constrain(mapZoom, 0.5, 2.5);
       return;
     }
     
-    // Relay comp knob
-    float rcKnobX = map(relayCompensation, 0, 30, rcSliderX, rcSliderX + sliderW);
-    if (!smoothSliderDragging && !relayCompSliderDragging &&
-        dist(mouseX, mouseY, rcKnobX, rcY - 2 + sliderH/2) < knobSize) {
-      relayCompSliderDragging = true;
+    // Offset X slider
+    float oxSliderX = px + 170, oxSliderW = 160, oxSliderH = 4, oxKnobSize = 14;
+    float oxKnobX = map(mapOffsetX, -100, 100, oxSliderX, oxSliderX + oxSliderW);
+    if (!mapAlphaSliderDragging && !mapZoomSliderDragging && !mapOffsetXSliderDragging && !mapOffsetYSliderDragging
+        && !beamOpacitySliderDragging && !beamWidthSliderDragging
+        && dist(mouseX, mouseY, oxKnobX, oxY - 2 + oxSliderH/2) < oxKnobSize) {
+      mapOffsetXSliderDragging = true;
     }
-    if (relayCompSliderDragging) {
-      relayCompensation = map(constrain(mouseX, rcSliderX, rcSliderX + sliderW), rcSliderX, rcSliderX + sliderW, 0.0, 30.0);
-      relayCompensation = constrain(relayCompensation, 0.0, 30.0);
+    if (mapOffsetXSliderDragging) {
+      mapOffsetX = map(constrain(mouseX, oxSliderX, oxSliderX + oxSliderW), oxSliderX, oxSliderX + oxSliderW, -100, 100);
+      mapOffsetX = constrain(mapOffsetX, -100, 100);
+      return;
+    }
+    
+    // Offset Y slider
+    float oySliderX = px + 170, oySliderW = 160, oySliderH = 4, oyKnobSize = 14;
+    float oyKnobX = map(mapOffsetY, -100, 100, oySliderX, oySliderX + oySliderW);
+    if (!mapAlphaSliderDragging && !mapZoomSliderDragging && !mapOffsetXSliderDragging && !mapOffsetYSliderDragging
+        && !beamOpacitySliderDragging && !beamWidthSliderDragging
+        && dist(mouseX, mouseY, oyKnobX, oyY - 2 + oySliderH/2) < oyKnobSize) {
+      mapOffsetYSliderDragging = true;
+    }
+    if (mapOffsetYSliderDragging) {
+      mapOffsetY = map(constrain(mouseX, oySliderX, oySliderX + oySliderW), oySliderX, oySliderX + oySliderW, -100, 100);
+      mapOffsetY = constrain(mapOffsetY, -100, 100);
+      return;
+    }
+    
+    // Beam pattern opacity slider
+    float sepY = oyY + 28;
+    float chkY = sepY + 10;
+    float rowH = 26;
+    float bpY = chkY + rowH * 4 + 8;
+    float bpSliderX = px + 165, bpSliderW = 150, bpSliderH = 4, bpKnobSize = 14;
+    float bpKnobX = map(beamPatternOpacity, 0.0, 1.0, bpSliderX, bpSliderX + bpSliderW);
+    if (!mapAlphaSliderDragging && !mapZoomSliderDragging && !mapOffsetXSliderDragging && !mapOffsetYSliderDragging
+        && !beamOpacitySliderDragging && !beamWidthSliderDragging
+        && dist(mouseX, mouseY, bpKnobX, bpY - 2 + bpSliderH/2) < bpKnobSize) {
+      beamOpacitySliderDragging = true;
+    }
+    if (beamOpacitySliderDragging) {
+      beamPatternOpacity = map(constrain(mouseX, bpSliderX, bpSliderX + bpSliderW), bpSliderX, bpSliderX + bpSliderW, 0.0, 1.0);
+      beamPatternOpacity = constrain(beamPatternOpacity, 0.0, 1.0);
+      return;
+    }
+    
+    // Beam pattern beamwidth slider
+    float bwY = bpY + 22;
+    float bwSliderX = px + 165, bwSliderW = 150, bwSliderH = 4, bwKnobSize = 14;
+    float bwKnobX = map(beamPatternBeamWidth, 10.0, 120.0, bwSliderX, bwSliderX + bwSliderW);
+    if (!mapAlphaSliderDragging && !mapZoomSliderDragging && !mapOffsetXSliderDragging && !mapOffsetYSliderDragging
+        && !beamOpacitySliderDragging && !beamWidthSliderDragging
+        && dist(mouseX, mouseY, bwKnobX, bwY - 2 + bwSliderH/2) < bwKnobSize) {
+      beamWidthSliderDragging = true;
+    }
+    if (beamWidthSliderDragging) {
+      beamPatternBeamWidth = map(constrain(mouseX, bwSliderX, bwSliderX + bwSliderW), bwSliderX, bwSliderX + bwSliderW, 10.0, 120.0);
+      beamPatternBeamWidth = constrain(beamPatternBeamWidth, 10.0, 120.0);
       return;
     }
   }
@@ -2582,7 +2607,7 @@ void checkRotatorButtonsPressed() {
   if (!systemOn || !rotatorPowerOn) return;
   
   float centerX = mapCenterX;
-  float btnY = mapCenterY + 155;
+  float btnY = mapCenterY + 170;
   float btnH = 38, gap = 8;
   
   if (showBrakeControls) {
@@ -2609,17 +2634,6 @@ void checkRotatorButtonsPressed() {
     if (mouseX > cwX && mouseX < cwX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
       activateCWRelay(); return;
     }
-    // HALT GOTO
-    if (goToActive) {
-      float haltGotoW = btnW * 2 + gap;
-      float haltGotoX = centerX - haltGotoW / 2;
-      float haltGotoY = btnY + btnH + 15;
-      if (mouseX > haltGotoX && mouseX < haltGotoX + haltGotoW && mouseY > haltGotoY && mouseY < haltGotoY + btnH) {
-        goToActive = false; goToTarget = -1;
-        sendRotatorCommand("GOTO:HALT"); deactivateRotatorRelays();
-        addNotification("GOTO annullato", WARNING); return;
-      }
-    }
     
   } else {
     // Layout 3 pulsanti senza freno
@@ -2640,17 +2654,6 @@ void checkRotatorButtonsPressed() {
     float cwX = startX + (btnW + gap) * 2;
     if (mouseX > cwX && mouseX < cwX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
       activateCWRelay(); return;
-    }
-    // HALT GOTO
-    if (goToActive) {
-      float haltGotoW = totalWidth / 2;
-      float haltGotoX = centerX - haltGotoW / 2;
-      float haltGotoY = btnY + btnH + 15;
-      if (mouseX > haltGotoX && mouseX < haltGotoX + haltGotoW && mouseY > haltGotoY && mouseY < haltGotoY + btnH) {
-        goToActive = false; goToTarget = -1;
-        sendRotatorCommand("GOTO:HALT"); deactivateRotatorRelays();
-        addNotification("GOTO annullato", WARNING); return;
-      }
     }
   }
 }
@@ -2715,17 +2718,17 @@ void emergencyHalt() {
   brakeButtonPressed = false;
   brakeReleased = false;
   
+  // Always clear target on HALT so it disappears from the map
+  targetAzimuth = -1;
+  goToActive = false;
+  goToTarget = -1;
+  
   addDebugLog("!!! EMERGENCY HALT !!!");
   sendRotatorCommand("CW:0");
   sendRotatorCommand("CCW:0");
-  sendRotatorCommand("BRAKE:0:0");  // Immediate brake engagement (0ms delay) for safety
+  sendRotatorCommand("BRAKE:0:0");
   sendRotatorCommand("HALT:1");
-  
-  if (goToActive) {
-    goToActive = false;
-    goToTarget = -1;
-    sendRotatorCommand("GOTO:HALT");
-  }
+  sendRotatorCommand("GOTO:HALT");
   
   addNotification("EMERGENCY HALT!", ERROR);
 }
@@ -2874,15 +2877,15 @@ void checkConnectionSettingsClick(float px, float py) {
   if (antConnMode == 1) {
     float configY = toggleY + 35;
     
-    // IP field click
-    if (mouseX > px + 30 && mouseX < px + 180 && mouseY > configY && mouseY < configY + 26) {
+    // IP field click (new position: px+56 to px+186)
+    if (mouseX > px + 56 && mouseX < px + 186 && mouseY > configY && mouseY < configY + 26) {
       editingField = 20;
       inputBuffer = antWifiIP;
       return;
     }
     
-    // Port field click
-    if (mouseX > px + 200 && mouseX < px + 280 && mouseY > configY && mouseY < configY + 26) {
+    // Port field click (new position: px+238 to px+308)
+    if (mouseX > px + 238 && mouseX < px + 308 && mouseY > configY && mouseY < configY + 26) {
       editingField = 21;
       inputBuffer = str(antWifiPort);
       return;
@@ -2933,15 +2936,15 @@ void checkConnectionSettingsClick(float px, float py) {
   if (rotConnMode == 1) {
     float rotConfigY = rotToggleY + 35;
     
-    // IP field click
-    if (mouseX > px + 30 && mouseX < px + 180 && mouseY > rotConfigY && mouseY < rotConfigY + 26) {
+    // IP field click (new position: px+56 to px+186)
+    if (mouseX > px + 56 && mouseX < px + 186 && mouseY > rotConfigY && mouseY < rotConfigY + 26) {
       editingField = 22;
       inputBuffer = rotWifiIP;
       return;
     }
     
-    // Port field click
-    if (mouseX > px + 200 && mouseX < px + 280 && mouseY > rotConfigY && mouseY < rotConfigY + 26) {
+    // Port field click (new position: px+238 to px+308)
+    if (mouseX > px + 238 && mouseX < px + 308 && mouseY > rotConfigY && mouseY < rotConfigY + 26) {
       editingField = 23;
       inputBuffer = str(rotWifiPort);
       return;
@@ -2957,8 +2960,8 @@ void checkConnectionSettingsClick(float px, float py) {
     return;
   }
   
-  // Scan Ports
-  float scanBtnY = rotBtnY + 30;
+  // Scan Ports (new y: rotBtnY + 50)
+  float scanBtnY = rotBtnY + 50;
   if (mouseX > px + 30 && mouseX < px + 130 && mouseY > scanBtnY && mouseY < scanBtnY + 28) {
     scanSerialPorts();
     addNotification("Porte scansionate", INFO);
@@ -2977,18 +2980,41 @@ void checkMapSettingsClick(float px, float py) {
     return;
   }
   
-  // Sfoglia button
+  // Sfoglia button (PNG/JPG)
   float pathY = py + 28;
-  if (mouseX > px + 390 && mouseX < px + 460 && mouseY > pathY - 4 && mouseY < pathY + 18) {
-    selectInput("Seleziona immagine mappa", "mapImageSelected");
+  if (mouseX > px + 360 && mouseX < px + 420 && mouseY > pathY - 4 && mouseY < pathY + 18) {
+    selectInput("Seleziona immagine mappa (PNG/JPG)", "mapImageSelected");
     return;
   }
   
-  // Opacita mappa slider area handled by mouseDragged
+  // PDF info button
+  if (mouseX > px + 428 && mouseX < px + 488 && mouseY > pathY - 4 && mouseY < pathY + 18) {
+    addNotification("PDF: converti a PNG/JPG prima", WARNING);
+    addDebugLog("Info PDF: Processing non supporta PDF nativamente.");
+    addDebugLog("  Scarica la mappa da ns6t.net/azimuth, poi converti");
+    addDebugLog("  a PNG/JPG con un visualizzatore PDF prima di importare.");
+    return;
+  }
   
-  // Separator line
-  float maY = py + 70;
-  float chkY = maY + 35;
+  // Slider areas handled by mouseDragged
+  
+  float maY = py + 68;
+  float zY = maY + 22;
+  float oxY = zY + 22;
+  float oyY = oxY + 22;
+  
+  // Reset offset button (same bounds as hover: px+360 to px+440, oxY-2 to oxY+40)
+  if (mouseX > px + 360 && mouseX < px + 440 && mouseY > oxY - 2 && mouseY < oxY + 40) {
+    mapOffsetX = 0;
+    mapOffsetY = 0;
+    rebuildMaskedMap();
+    settings.saveSettings();
+    addNotification("Offset resettato", INFO);
+    return;
+  }
+  
+  float sepY = oyY + 28;
+  float chkY = sepY + 10;
   float rowH = 26;
   
   // Mostra controlli freno
@@ -3101,9 +3127,7 @@ void checkPreferencesSettingsClick(float px, float py) {
   
   // Slider area handled by mouseDragged
   float sepY = y + rowH * 6 + 6;
-  float sfY = sepY + 18;
-  float rcY = sfY + 35;
-  float btnY = rcY + 40;
+  float btnY = sepY + 20;
   
   // Salva Preferenze
   if (mouseX > px + 30 && mouseX < px + 160 && mouseY > btnY && mouseY < btnY + 32) {
@@ -3681,6 +3705,16 @@ void parseRotatorStatusFromJson(JSONObject d) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 void loadMapImage(String path) {
+  // PDF is not natively supported by Processing - inform user
+  if (path.toLowerCase().endsWith(".pdf")) {
+    addNotification("PDF non supportato: usa PNG/JPG", WARNING);
+    addDebugLog("NOTA: Processing non supporta PDF nativamente.");
+    addDebugLog("  Scarica la mappa da ns6t.net/azimuth/azimuth.html,");
+    addDebugLog("  poi converti il PDF in PNG/JPG con un tool esterno");
+    addDebugLog("  (es. Adobe Reader, Preview, ImageMagick) prima di importare.");
+    return;
+  }
+  
   try {
     PImage img = loadImage(path);
     if (img == null || img.width <= 0 || img.height <= 0) {
@@ -3688,21 +3722,14 @@ void loadMapImage(String path) {
       addNotification("Errore caricamento mappa", ERROR);
       return;
     }
-    int size = int(mapRadius * 2);
-    img.resize(size, size);
     
-    // Crea maschera circolare
-    PGraphics maskGraphics = createGraphics(size, size);
-    maskGraphics.beginDraw();
-    maskGraphics.background(0);
-    maskGraphics.fill(255);
-    maskGraphics.noStroke();
-    maskGraphics.ellipse(size / 2.0, size / 2.0, size, size);
-    maskGraphics.endDraw();
-    img.mask(maskGraphics);
-    
-    maskedMapImage = img;
+    // Store original source image (unmasked) for zoom/offset rebuilding
+    sourceMapImage = img;
     mapImagePath = path;
+    
+    // Build the masked (clipped) image with current zoom/offset
+    rebuildMaskedMap();
+    
     settings.saveSettings();
     addDebugLog("Mappa caricata: " + path);
     addNotification("Mappa caricata", SUCCESS);
@@ -3710,6 +3737,43 @@ void loadMapImage(String path) {
     addDebugLog("Errore mappa: " + e.getMessage());
     addNotification("Errore caricamento mappa", ERROR);
   }
+}
+
+void rebuildMaskedMap() {
+  if (sourceMapImage == null) return;
+  
+  int size = int(mapRadius * 2);
+  
+  // Draw source image with zoom and offset into an off-screen buffer
+  PGraphics g = createGraphics(size, size);
+  g.beginDraw();
+  g.background(0, 0);  // transparent background
+  g.imageMode(CENTER);
+  // Keep aspect ratio: scale proportionally to fill the circle
+  float aspect = (float)sourceMapImage.width / (float)sourceMapImage.height;
+  float drawW, drawH;
+  if (aspect >= 1.0) {
+    drawW = size * mapZoom;
+    drawH = size * mapZoom / aspect;
+  } else {
+    drawH = size * mapZoom;
+    drawW = size * mapZoom * aspect;
+  }
+  g.image(sourceMapImage, size / 2.0 + mapOffsetX, size / 2.0 + mapOffsetY, drawW, drawH);
+  g.endDraw();
+  
+  // Apply circular mask so the image is clipped inside the compass circle
+  PImage masked = g.get();
+  PGraphics maskG = createGraphics(size, size);
+  maskG.beginDraw();
+  maskG.background(0);
+  maskG.fill(255);
+  maskG.noStroke();
+  maskG.ellipse(size / 2.0, size / 2.0, size, size);
+  maskG.endDraw();
+  masked.mask(maskG);
+  
+  maskedMapImage = masked;
 }
 
 void mapImageSelected(File selection) {
@@ -3726,10 +3790,22 @@ void exit() {
   addDebugLog("Chiusura...");
   
   try {
-    if (disconnectRelaysOnExit && antConnected) {
-      sendAntennaCommand("ALLOFF");
-      addDebugLog("TX ANT: ALLOFF");
-      delay(100);
+    if (disconnectRelaysOnExit) {
+      // Send ALL OFF commands only when the toggle is enabled
+      if (antConnected) {
+        sendAntennaCommand("ALLOFF");
+        addDebugLog("TX ANT: ALLOFF (disconnectRelaysOnExit=true)");
+        delay(100);
+      }
+      if (rotConnected) {
+        sendRotatorCommand("CW:0");
+        sendRotatorCommand("CCW:0");
+        sendRotatorCommand("ROTATOR_PWR:0");
+        delay(100);
+      }
+    } else {
+      // Do NOT send OFF commands - leave relays in current state
+      addDebugLog("Relè lasciati attivi (disconnectRelaysOnExit=false)");
     }
     
     if (sendHaltOnExit && rotConnected) {
@@ -3743,8 +3819,19 @@ void exit() {
     }
     
     settings.saveSettings();
-    disconnectAntESP32();
-    disconnectRotESP32();
+    
+    // Close serial/network connections without sending additional OFF commands
+    try {
+      if (antSerial != null) { antSerial.stop(); antSerial = null; }
+      if (antClient != null) { antClient.stop(); antClient = null; }
+      antConnected = false;
+    } catch (Exception e) {}
+    try {
+      if (rotSerial != null) { rotSerial.stop(); rotSerial = null; }
+      if (rotClient != null) { rotClient.stop(); rotClient = null; }
+      rotConnected = false;
+    } catch (Exception e) {}
+    
     delay(150);
   } catch (Exception e) {}
   
