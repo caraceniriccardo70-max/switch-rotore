@@ -1840,8 +1840,8 @@ void drawMapSettings(float px, float py) {
   textAlign(LEFT, CENTER);
   text(int(mapOffsetY) + "px", oySliderX + oySliderW + 10, oyY + 2);
   
-  // Reset offset button
-  boolean resetOfsHover = mouseX > px + 360 && mouseX < px + 440 && mouseY > oxY - 4 && mouseY < oxY + oyY - oxY + 22 - 4;
+  // Reset offset button (rect: px+360 to px+440, oxY-2 to oxY+40)
+  boolean resetOfsHover = mouseX > px + 360 && mouseX < px + 440 && mouseY > oxY - 2 && mouseY < oxY + 40;
   fill(resetOfsHover ? lerpColor(theme.warning, theme.text, 0.2) : theme.warning);
   stroke(theme.warning);
   rect(px + 360, oxY - 2, 80, 42, 6);
@@ -3003,8 +3003,8 @@ void checkMapSettingsClick(float px, float py) {
   float oxY = zY + 22;
   float oyY = oxY + 22;
   
-  // Reset offset button
-  if (mouseX > px + 360 && mouseX < px + 440 && mouseY > oxY - 2 && mouseY < oyY + 20) {
+  // Reset offset button (same bounds as hover: px+360 to px+440, oxY-2 to oxY+40)
+  if (mouseX > px + 360 && mouseX < px + 440 && mouseY > oxY - 2 && mouseY < oxY + 40) {
     mapOffsetX = 0;
     mapOffsetY = 0;
     rebuildMaskedMap();
