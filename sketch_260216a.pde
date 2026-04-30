@@ -90,18 +90,18 @@ class Notification {
     color bgColor = type == SUCCESS ? theme.success : type == WARNING ? theme.warning : type == ERROR ? theme.error : theme.accent;
     fill(0, 0, 0, alpha * 0.4);
     noStroke();
-    rect(width - 264, y + 3, 220, 50, 10);
+    rect(800 - 264, y + 3, 220, 50, 10);
     fill(red(bgColor), green(bgColor), blue(bgColor), alpha);
-    rect(width - 260, y, 220, 48, 10);
+    rect(800 - 260, y, 220, 48, 10);
     fill(255, 255, 255, alpha);
     textFont(fontRegular);
     textSize(11);
     textAlign(LEFT, CENTER);
-    text(message, width - 245, y + 24);
+    text(message, 800 - 245, y + 24);
     float progress = 1.0 - (float)(millis() - timestamp) / 4000.0;
     if (progress > 0 && ! removing) {
       fill(255, 255, 255, alpha * 0.5);
-      rect(width - 260, y + 42, 220 * progress, 3, 0, 0, 10, 10);
+      rect(800 - 260, y + 42, 220 * progress, 3, 0, 0, 10, 10);
     }
   }
 }
@@ -184,6 +184,19 @@ class SettingsManager {
     config.setFloat("mapZoom", 1.0);
     config.setFloat("mapOffsetX", 0.0);
     config.setFloat("mapOffsetY", 0.0);
+    
+    // Macro preset defaults
+    JSONArray macroNamesArr = new JSONArray();
+    JSONArray macroAzimuthsArr = new JSONArray();
+    String[] defMacroNames = {"Nord", "Est", "Sud", "Ovest", "Home"};
+    int[] defMacroAzimuths = {0, 90, 180, 270, 0};
+    for (int i = 0; i < 5; i++) {
+      macroNamesArr.setString(i, defMacroNames[i]);
+      macroAzimuthsArr.setInt(i, defMacroAzimuths[i]);
+    }
+    config.setJSONArray("macroNames", macroNamesArr);
+    config.setJSONArray("macroAzimuths", macroAzimuthsArr);
+    
     saveSettings();
   }
   
@@ -234,6 +247,20 @@ class SettingsManager {
       mapZoom = config.getFloat("mapZoom", 1.0);
       mapOffsetX = config.getFloat("mapOffsetX", 0.0);
       mapOffsetY = config.getFloat("mapOffsetY", 0.0);
+      
+      // Macro presets
+      if (config.hasKey("macroNames") && config.hasKey("macroAzimuths")) {
+        JSONArray mNamesArr = config.getJSONArray("macroNames");
+        JSONArray mAzimuthsArr = config.getJSONArray("macroAzimuths");
+        for (int i = 0; i < min(5, mNamesArr.size()); i++) {
+          macroNames[i] = mNamesArr.getString(i);
+          tempMacroNames[i] = macroNames[i];
+        }
+        for (int i = 0; i < min(5, mAzimuthsArr.size()); i++) {
+          macroAzimuths[i] = mAzimuthsArr.getInt(i);
+          tempMacroAzimuths[i] = macroAzimuths[i];
+        }
+      }
       
       if (currentThemeIdx != 0) applyTheme(currentThemeIdx);
     } catch (Exception e) { }
@@ -288,6 +315,16 @@ class SettingsManager {
       config.setFloat("mapZoom", mapZoom);
       config.setFloat("mapOffsetX", mapOffsetX);
       config.setFloat("mapOffsetY", mapOffsetY);
+      
+      // Macro presets
+      JSONArray mNamesArr = new JSONArray();
+      JSONArray mAzimuthsArr = new JSONArray();
+      for (int i = 0; i < 5; i++) {
+        mNamesArr.setString(i, macroNames[i]);
+        mAzimuthsArr.setInt(i, macroAzimuths[i]);
+      }
+      config.setJSONArray("macroNames", mNamesArr);
+      config.setJSONArray("macroAzimuths", mAzimuthsArr);
       
       saveJSONObject(config, settingsFile);
     } catch (Exception e) { }
@@ -363,9 +400,19 @@ float rawAzimuth = 0;
 float mapCenterX, mapCenterY;
 float mapRadius = 110;
 
-boolean[] buttonHover = new boolean[30];
-float[] buttonAnim = new float[30];
+boolean[] buttonHover = new boolean[40];
+float[] buttonAnim = new float[40];
 float powerSwitchAnim = 1.0; // Animation value for power switch (0.0 to 1.0)
+
+// ─── Scala finestra ridimensionabile ─────────────────────────────────────
+float scaleFactor = 1.0;
+float scaledMouseX = 0, scaledMouseY = 0;
+
+// ─── Macro preset azimuth ────────────────────────────────────────────────
+String[] macroNames = {"Nord", "Est", "Sud", "Ovest", "Home"};
+int[] macroAzimuths = {0, 90, 180, 270, 0};
+String[] tempMacroNames = new String[5];
+int[] tempMacroAzimuths = new int[5];
 
 PFont fontRegular, fontBold, fontLarge, fontMono;
 
@@ -440,6 +487,7 @@ void setup() {
   smooth(8);
   frameRate(60);
   surface.setTitle(APP_NAME + " v" + APP_VERSION);
+  surface.setResizable(true);
   
   fontRegular = createFont("Segoe UI", 12);
   fontBold = createFont("Segoe UI Bold", 12);
@@ -456,6 +504,11 @@ void setup() {
   arrayCopy(antennaNames, tempAntennaNames);
   arrayCopy(antennaPins, tempAntennaPins);
   arrayCopy(antennaDirective, tempAntennaDirective);
+  
+  for (int i = 0; i < 5; i++) {
+    tempMacroNames[i] = macroNames[i];
+    tempMacroAzimuths[i] = macroAzimuths[i];
+  }
   
   settings = new SettingsManager();
   if (mapImagePath.length() > 0) loadMapImage(mapImagePath);
@@ -511,8 +564,19 @@ void addDebugLog(String msg) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 void draw() {
+  // Compute proportional scale factor (maintain 800x600 aspect ratio)
+  scaleFactor = min((float)width / 800.0, (float)height / 600.0);
+  scaledMouseX = mouseX / scaleFactor;
+  scaledMouseY = mouseY / scaleFactor;
+  
+  // Background fills actual window (before scaling)
   drawBackground();
+  
   updateAnimations();
+  
+  // Apply proportional scale so all content fits in 800x600 logical space
+  pushMatrix();
+  scale(scaleFactor);
   
   // Read WiFi data if connected
   if (antConnMode == 1 && antClient != null && antClient.available() > 0) {
@@ -538,13 +602,13 @@ void draw() {
   }
   
   pushMatrix();
-  if (transitioning) translate(-width * screenTransition, 0);
+  if (transitioning) translate(-800 * screenTransition, 0);
   drawCurrentScreen();
   popMatrix();
   
   if (transitioning) {
     pushMatrix();
-    translate(width * (1 - screenTransition), 0);
+    translate(800 * (1 - screenTransition), 0);
     drawTargetScreen();
     popMatrix();
   }
@@ -554,6 +618,11 @@ void draw() {
   
   notificationManager.update();
   notificationManager.draw();
+  
+  popMatrix(); // end scale
+  
+  // Draw resize handle in screen coordinates (after scale pop)
+  drawResizeHandle();
 }
 
 void drawBackground() {
@@ -561,6 +630,20 @@ void drawBackground() {
     float inter = map(i, 0, height, 0, 1);
     stroke(lerpColor(theme.background, color(5, 5, 10), inter));
     line(0, i, width, i);
+  }
+}
+
+void drawResizeHandle() {
+  // Draw a green corner triangle in bottom-right to indicate resize from corner
+  int sz = 18;
+  fill(0, 220, 100, 180);
+  noStroke();
+  triangle(width - sz, height, width, height - sz, width, height);
+  // small dots for visual grip
+  fill(0, 255, 130, 220);
+  for (int i = 1; i <= 3; i++) {
+    ellipse(width - i * 4, height - 2, 2, 2);
+    ellipse(width - 2, height - i * 4, 2, 2);
   }
 }
 
@@ -637,7 +720,7 @@ void drawAntennaPanel() {
 }
 
 void drawAntennaButton(int idx, float x, float y, float w, float h) {
-  boolean hover = mouseX > x && mouseX < x + w && mouseY > y && mouseY < y + h && systemOn;
+  boolean hover = scaledMouseX > x && scaledMouseX < x + w && scaledMouseY > y && scaledMouseY < y + h && systemOn;
   buttonHover[idx] = hover;
   boolean selected = (selectedAntenna == idx);
   boolean active = antennaStates[idx];
@@ -716,7 +799,7 @@ void drawAntennaButton(int idx, float x, float y, float w, float h) {
 }
 
 void drawRotatorPanel() {
-  float px = 330, py = 55, pw = 450, ph = 420;
+  float px = 330, py = 55, pw = 450, ph = 470;
   drawPanel(px, py, pw, ph, "ROTATOR CONTROL", true);
   
   mapCenterX = px + pw/2;
@@ -730,13 +813,14 @@ void drawRotatorPanel() {
   
   drawAzimuthMap();
   drawRotatorButtons();
+  drawMacroButtons();
 }
 
 // NUOVO: Switch ON/OFF rotatore
 void drawRotatorPowerSwitch(float x, float y) {
   float w = 120, h = 30;
   
-  boolean hover = mouseX > x && mouseX < x + w && mouseY > y && mouseY < y + h && systemOn;
+  boolean hover = scaledMouseX > x && scaledMouseX < x + w && scaledMouseY > y && scaledMouseY < y + h && systemOn;
   buttonHover[27] = hover;
   
   // Background
@@ -1016,8 +1100,67 @@ void drawRotatorButtons() {
   }
 }
 
-void drawMomentaryButton(String label, float x, float y, float w, float h, int idx, boolean pressed, color activeColor, boolean enabled) {
-  boolean hover = mouseX > x && mouseX < x + w && mouseY > y && mouseY < y + h && enabled;
+void drawMacroButtons() {
+  float centerX = mapCenterX;
+  float macroY = mapCenterY + 215;
+  float macroW = 76, macroH = 32, macroGap = 6;
+  float totalW = macroW * 5 + macroGap * 4;
+  float startX = centerX - totalW / 2;
+  boolean rotatorEnabled = systemOn && rotatorPowerOn;
+  
+  for (int i = 0; i < 5; i++) {
+    float bx = startX + i * (macroW + macroGap);
+    drawMacroButton(i, bx, macroY, macroW, macroH, rotatorEnabled);
+  }
+}
+
+void drawMacroButton(int idx, float x, float y, float w, float h, boolean enabled) {
+  boolean hover = scaledMouseX > x && scaledMouseX < x + w && scaledMouseY > y && scaledMouseY < y + h && enabled;
+  buttonHover[30 + idx] = hover;
+  
+  float animValue = easeOutCubic(buttonAnim[30 + idx]);
+  
+  pushMatrix();
+  if (hover) translate(0, -2 * animValue);
+  
+  // Shadow
+  fill(0, 0, 0, 40 + 40 * animValue);
+  noStroke();
+  rect(x + 2, y + 3, w, h, 6);
+  
+  // Background
+  color bgCol = !enabled ? theme.disabled : hover ? theme.hover : theme.secondary;
+  fill(bgCol);
+  stroke(hover ? theme.accent : theme.border);
+  strokeWeight(hover ? 2 : 1);
+  rect(x, y, w, h, 6);
+  
+  // Hover glow
+  if (hover && enabled) {
+    noFill();
+    stroke(theme.accent, 60 * animValue);
+    strokeWeight(2);
+    rect(x - 1, y - 1, w + 2, h + 2, 7);
+  }
+  
+  // Macro name
+  fill(enabled ? theme.text : theme.textDim);
+  textFont(fontBold);
+  textSize(10);
+  textAlign(CENTER, CENTER);
+  String nm = macroNames[idx];
+  if (nm.length() > 8) nm = nm.substring(0, 7) + ".";
+  text(nm, x + w/2, y + h/2 - 5);
+  
+  // Azimuth in small text below
+  fill(enabled ? theme.accent : theme.textDim);
+  textFont(fontRegular);
+  textSize(8);
+  text(macroAzimuths[idx] + "\u00b0", x + w/2, y + h/2 + 7);
+  
+  popMatrix();
+}(String label, float x, float y, float w, float h, int idx, boolean pressed, color activeColor, boolean enabled) {
+  boolean hover = scaledMouseX > x && scaledMouseX < x + w && scaledMouseY > y && scaledMouseY < y + h && enabled;
   buttonHover[idx] = hover;
   
   float animValue = easeOutCubic(buttonAnim[idx]);
@@ -1065,7 +1208,7 @@ void drawMomentaryButton(String label, float x, float y, float w, float h, int i
 }
 
 void drawBrakeButton(String label, float x, float y, float w, float h, int idx, boolean enabled) {
-  boolean hover = mouseX > x && mouseX < x + w && mouseY > y && mouseY < y + h && enabled;
+  boolean hover = scaledMouseX > x && scaledMouseX < x + w && scaledMouseY > y && scaledMouseY < y + h && enabled;
   buttonHover[idx] = hover;
   
   float animValue = easeOutCubic(buttonAnim[idx]);
@@ -1144,7 +1287,7 @@ void drawBrakeButton(String label, float x, float y, float w, float h, int idx, 
 }
 
 void drawHaltButton(String label, float x, float y, float w, float h, int idx, boolean enabled) {
-  boolean hover = mouseX > x && mouseX < x + w && mouseY > y && mouseY < y + h && enabled;
+  boolean hover = scaledMouseX > x && scaledMouseX < x + w && scaledMouseY > y && scaledMouseY < y + h && enabled;
   buttonHover[idx] = hover;
   
   float animValue = easeOutCubic(buttonAnim[idx]);
@@ -1218,7 +1361,7 @@ void drawBrakeDelaySlider(float x, float y) {
   
   // Knob position
   float knobX = map(brakeDelayMs, brakeDelayMin, brakeDelayMax, sliderX, sliderX + sliderW);
-  boolean hoverKnob = dist(mouseX, mouseY, knobX, y + sliderH/2) < knobSize;
+  boolean hoverKnob = dist(scaledMouseX, scaledMouseY, knobX, y + sliderH/2) < knobSize;
   
   // Knob
   if (hoverKnob || brakeSliderDragging) {
@@ -1355,6 +1498,7 @@ void drawSettingsScreen() {
     case 2: drawMapSettings(px, py + 90); break;
     case 3: drawLookSettings(px, py + 90); break;
     case 4: drawPreferencesSettings(px, py + 90); break;
+    case 5: drawMacroSettings(px, py + 90); break;
   }
   
   // Global Save/Cancel only needed for Antenne tab (temp values)
@@ -1362,12 +1506,12 @@ void drawSettingsScreen() {
 }
 
 void drawSettingsTabs(float x, float y) {
-  String[] tabs = {"Connessioni", "Antenne", "Mappa", "Look", "Preferenze"};
-  float tabW = 120, tabH = 32, gap = 8;
+  String[] tabs = {"Connessioni", "Antenne", "Mappa", "Look", "Preferenze", "MACRO"};
+  float tabW = 100, tabH = 32, gap = 6;
   
   for (int i = 0; i < tabs.length; i++) {
     float tx = x + i * (tabW + gap);
-    boolean hover = mouseX > tx && mouseX < tx + tabW && mouseY > y && mouseY < y + tabH;
+    boolean hover = scaledMouseX > tx && scaledMouseX < tx + tabW && scaledMouseY > y && scaledMouseY < y + tabH;
     boolean active = (currentSettingsTab == i);
     
     fill(active ? theme.accent : hover ? theme.hover : theme.secondary);
@@ -1377,7 +1521,7 @@ void drawSettingsTabs(float x, float y) {
     
     fill(active ? theme.primary : theme.text);
     textFont(fontBold);
-    textSize(11);
+    textSize(10);
     textAlign(CENTER, CENTER);
     text(tabs[i], tx + tabW/2, y + tabH/2);
   }
@@ -1412,7 +1556,7 @@ void drawAntennaSettings(float px, float py) {
 
 void drawTextField(float x, float y, float w, float h, int idx, String value, String placeholder) {
   boolean editing = (editingField == idx);
-  boolean hover = mouseX > x && mouseX < x + w && mouseY > y && mouseY < y + h;
+  boolean hover = scaledMouseX > x && scaledMouseX < x + w && scaledMouseY > y && scaledMouseY < y + h;
   
   fill(editing ? theme.panelLight : hover ? theme.hover : theme.panel);
   stroke(editing ? theme.accent : theme.border);
@@ -1439,7 +1583,7 @@ void drawTextField(float x, float y, float w, float h, int idx, String value, St
 
 void drawCheckbox(float x, float y, boolean checked, int idx) {
   float size = 18;
-  boolean hover = mouseX > x && mouseX < x + size && mouseY > y && mouseY < y + size;
+  boolean hover = scaledMouseX > x && scaledMouseX < x + size && scaledMouseY > y && scaledMouseY < y + size;
   
   fill(checked ? theme.accent : hover ? theme.hover : theme.panel);
   stroke(checked ? theme.accent : theme.border);
@@ -1467,8 +1611,8 @@ void drawConnectionSettings(float px, float py) {
   float toggleY = py + 25;
   float toggleW = 60, toggleH = 25, toggleGap = 10;
   
-  boolean usbHover = mouseX > px + 30 && mouseX < px + 30 + toggleW && mouseY > toggleY && mouseY < toggleY + toggleH;
-  boolean wifiHover = mouseX > px + 30 + toggleW + toggleGap && mouseX < px + 30 + toggleW * 2 + toggleGap && mouseY > toggleY && mouseY < toggleY + toggleH;
+  boolean usbHover = scaledMouseX > px + 30 && scaledMouseX < px + 30 + toggleW && scaledMouseY > toggleY && scaledMouseY < toggleY + toggleH;
+  boolean wifiHover = scaledMouseX > px + 30 + toggleW + toggleGap && scaledMouseX < px + 30 + toggleW * 2 + toggleGap && scaledMouseY > toggleY && scaledMouseY < toggleY + toggleH;
   
   fill(antConnMode == 0 ? theme.accent : (usbHover ? theme.hover : theme.secondary));
   stroke(antConnMode == 0 ? theme.accent : theme.border);
@@ -1503,7 +1647,7 @@ void drawConnectionSettings(float px, float py) {
       for (int i = 0; i < min(availablePorts.length, 4); i++) {
         float pbx = px + 120 + i * (portBtnW + 5);
         boolean portSelected = availablePorts[i].equals(antComPort);
-        boolean portHover = mouseX > pbx && mouseX < pbx + portBtnW && mouseY > configY - 11 && mouseY < configY + 11;
+        boolean portHover = scaledMouseX > pbx && scaledMouseX < pbx + portBtnW && scaledMouseY > configY - 11 && scaledMouseY < configY + 11;
         
         fill(portSelected ? theme.accent : (portHover ? theme.hover : theme.secondary));
         stroke(portSelected ? theme.accent : theme.border);
@@ -1536,7 +1680,7 @@ void drawConnectionSettings(float px, float py) {
   float antBtnY = configY + 30;
   color antConnColor = antConnected ? theme.error : theme.success;
   String antConnText = antConnected ? "DISCONNETTI" : "CONNETTI";
-  boolean antConnHover = mouseX > px + 30 && mouseX < px + 150 && mouseY > antBtnY && mouseY < antBtnY + 32;
+  boolean antConnHover = scaledMouseX > px + 30 && scaledMouseX < px + 150 && scaledMouseY > antBtnY && scaledMouseY < antBtnY + 32;
   
   fill(antConnHover ? lerpColor(antConnColor, theme.text, 0.2) : antConnColor);
   stroke(antConnColor);
@@ -1565,8 +1709,8 @@ void drawConnectionSettings(float px, float py) {
   // WiFi/USB Toggle
   float rotToggleY = rotY + 25;
   
-  boolean rotUsbHover = mouseX > px + 30 && mouseX < px + 30 + toggleW && mouseY > rotToggleY && mouseY < rotToggleY + toggleH;
-  boolean rotWifiHover = mouseX > px + 30 + toggleW + toggleGap && mouseX < px + 30 + toggleW * 2 + toggleGap && mouseY > rotToggleY && mouseY < rotToggleY + toggleH;
+  boolean rotUsbHover = scaledMouseX > px + 30 && scaledMouseX < px + 30 + toggleW && scaledMouseY > rotToggleY && scaledMouseY < rotToggleY + toggleH;
+  boolean rotWifiHover = scaledMouseX > px + 30 + toggleW + toggleGap && scaledMouseX < px + 30 + toggleW * 2 + toggleGap && scaledMouseY > rotToggleY && scaledMouseY < rotToggleY + toggleH;
   
   fill(rotConnMode == 0 ? theme.accent : (rotUsbHover ? theme.hover : theme.secondary));
   stroke(rotConnMode == 0 ? theme.accent : theme.border);
@@ -1600,7 +1744,7 @@ void drawConnectionSettings(float px, float py) {
       for (int i = 0; i < min(availablePorts.length, 4); i++) {
         float pbx = px + 120 + i * (portBtnW + 5);
         boolean portSelected = availablePorts[i].equals(rotComPort);
-        boolean portHover = mouseX > pbx && mouseX < pbx + portBtnW && mouseY > rotConfigY - 11 && mouseY < rotConfigY + 11;
+        boolean portHover = scaledMouseX > pbx && scaledMouseX < pbx + portBtnW && scaledMouseY > rotConfigY - 11 && scaledMouseY < rotConfigY + 11;
         
         fill(portSelected ? theme.accent : (portHover ? theme.hover : theme.secondary));
         stroke(portSelected ? theme.accent : theme.border);
@@ -1632,7 +1776,7 @@ void drawConnectionSettings(float px, float py) {
   float rotBtnY = rotConfigY + 30;
   color rotConnColor = rotConnected ? theme.error : theme.success;
   String rotConnText = rotConnected ? "DISCONNETTI" : "CONNETTI";
-  boolean rotConnHover = mouseX > px + 30 && mouseX < px + 150 && mouseY > rotBtnY && mouseY < rotBtnY + 32;
+  boolean rotConnHover = scaledMouseX > px + 30 && scaledMouseX < px + 150 && scaledMouseY > rotBtnY && scaledMouseY < rotBtnY + 32;
   
   fill(rotConnHover ? lerpColor(rotConnColor, theme.text, 0.2) : rotConnColor);
   stroke(rotConnColor);
@@ -1652,7 +1796,7 @@ void drawConnectionSettings(float px, float py) {
   
   // Scan Ports Button (moved lower to avoid collision with Disconnetti)
   float scanBtnY = rotBtnY + 50;
-  boolean scanHover = mouseX > px + 30 && mouseX < px + 130 && mouseY > scanBtnY && mouseY < scanBtnY + 28;
+  boolean scanHover = scaledMouseX > px + 30 && scaledMouseX < px + 130 && scaledMouseY > scanBtnY && scaledMouseY < scanBtnY + 28;
   fill(scanHover ? lerpColor(theme.warning, theme.text, 0.2) : theme.warning);
   stroke(theme.warning);
   rect(px + 30, scanBtnY, 100, 28, 6);
@@ -1691,7 +1835,7 @@ void drawMapSettings(float px, float py) {
   text(dispPath, pathFieldX + 5, pathY + 7);
   
   // Sfoglia PNG/JPG button
-  boolean sfogliaHover = mouseX > px + 360 && mouseX < px + 420 && mouseY > pathY - 4 && mouseY < pathY + 18;
+  boolean sfogliaHover = scaledMouseX > px + 360 && scaledMouseX < px + 420 && scaledMouseY > pathY - 4 && scaledMouseY < pathY + 18;
   fill(sfogliaHover ? lerpColor(theme.accent, theme.text, 0.2) : theme.accent);
   stroke(theme.accent);
   rect(px + 360, pathY - 4, 60, 22, 6);
@@ -1702,7 +1846,7 @@ void drawMapSettings(float px, float py) {
   text("Sfoglia", px + 390, pathY + 7);
   
   // PDF info button
-  boolean pdfHover = mouseX > px + 428 && mouseX < px + 488 && mouseY > pathY - 4 && mouseY < pathY + 18;
+  boolean pdfHover = scaledMouseX > px + 428 && scaledMouseX < px + 488 && scaledMouseY > pathY - 4 && scaledMouseY < pathY + 18;
   fill(pdfHover ? lerpColor(theme.warning, theme.text, 0.2) : theme.warning);
   stroke(theme.warning);
   rect(px + 428, pathY - 4, 60, 22, 6);
@@ -1736,7 +1880,7 @@ void drawMapSettings(float px, float py) {
   rect(maSliderX, maY - 2, maSliderW, maSliderH, 2);
   
   float maKnobX = map(mapImageAlpha, 0.0, 1.0, maSliderX, maSliderX + maSliderW);
-  boolean maHover = dist(mouseX, mouseY, maKnobX, maY - 2 + maSliderH/2) < maKnobSize;
+  boolean maHover = dist(scaledMouseX, scaledMouseY, maKnobX, maY - 2 + maSliderH/2) < maKnobSize;
   if ((maHover || mapAlphaSliderDragging) && showMapImage) {
     fill(theme.accent, 60); noStroke(); ellipse(maKnobX, maY - 2 + maSliderH/2, maKnobSize + 8, maKnobSize + 8);
   }
@@ -1766,7 +1910,7 @@ void drawMapSettings(float px, float py) {
   rect(zSliderX, zY - 2, zSliderW, zSliderH, 2);
   
   float zKnobX = map(mapZoom, 0.5, 2.5, zSliderX, zSliderX + zSliderW);
-  boolean zHover = dist(mouseX, mouseY, zKnobX, zY - 2 + zSliderH/2) < zKnobSize;
+  boolean zHover = dist(scaledMouseX, scaledMouseY, zKnobX, zY - 2 + zSliderH/2) < zKnobSize;
   if (zHover || mapZoomSliderDragging) {
     fill(theme.accent, 60); noStroke(); ellipse(zKnobX, zY - 2 + zSliderH/2, zKnobSize + 8, zKnobSize + 8);
   }
@@ -1796,7 +1940,7 @@ void drawMapSettings(float px, float py) {
   rect(oxSliderX, oxY - 2, oxSliderW, oxSliderH, 2);
   
   float oxKnobX = map(mapOffsetX, -100, 100, oxSliderX, oxSliderX + oxSliderW);
-  boolean oxHover = dist(mouseX, mouseY, oxKnobX, oxY - 2 + oxSliderH/2) < oxKnobSize;
+  boolean oxHover = dist(scaledMouseX, scaledMouseY, oxKnobX, oxY - 2 + oxSliderH/2) < oxKnobSize;
   if (oxHover || mapOffsetXSliderDragging) {
     fill(theme.accent, 60); noStroke(); ellipse(oxKnobX, oxY - 2 + oxSliderH/2, oxKnobSize + 8, oxKnobSize + 8);
   }
@@ -1826,7 +1970,7 @@ void drawMapSettings(float px, float py) {
   rect(oySliderX, oyY - 2, oySliderW, oySliderH, 2);
   
   float oyKnobX = map(mapOffsetY, -100, 100, oySliderX, oySliderX + oySliderW);
-  boolean oyHover = dist(mouseX, mouseY, oyKnobX, oyY - 2 + oySliderH/2) < oyKnobSize;
+  boolean oyHover = dist(scaledMouseX, scaledMouseY, oyKnobX, oyY - 2 + oySliderH/2) < oyKnobSize;
   if (oyHover || mapOffsetYSliderDragging) {
     fill(theme.accent, 60); noStroke(); ellipse(oyKnobX, oyY - 2 + oySliderH/2, oyKnobSize + 8, oyKnobSize + 8);
   }
@@ -1841,7 +1985,7 @@ void drawMapSettings(float px, float py) {
   text(int(mapOffsetY) + "px", oySliderX + oySliderW + 10, oyY + 2);
   
   // Reset offset button (rect: px+360 to px+440, oxY-2 to oxY+40)
-  boolean resetOfsHover = mouseX > px + 360 && mouseX < px + 440 && mouseY > oxY - 2 && mouseY < oxY + 40;
+  boolean resetOfsHover = scaledMouseX > px + 360 && scaledMouseX < px + 440 && scaledMouseY > oxY - 2 && scaledMouseY < oxY + 40;
   fill(resetOfsHover ? lerpColor(theme.warning, theme.text, 0.2) : theme.warning);
   stroke(theme.warning);
   rect(px + 360, oxY - 2, 80, 42, 6);
@@ -1878,7 +2022,7 @@ void drawMapSettings(float px, float py) {
   strokeWeight(1);
   rect(bpSliderX, bpY - 2, bpSliderW, bpSliderH, 2);
   float bpKnobX = map(beamPatternOpacity, 0.0, 1.0, bpSliderX, bpSliderX + bpSliderW);
-  boolean bpHover = dist(mouseX, mouseY, bpKnobX, bpY - 2 + bpSliderH/2) < bpKnobSize;
+  boolean bpHover = dist(scaledMouseX, scaledMouseY, bpKnobX, bpY - 2 + bpSliderH/2) < bpKnobSize;
   if (bpHover || beamOpacitySliderDragging) { fill(theme.accent, 60); noStroke(); ellipse(bpKnobX, bpY - 2 + bpSliderH/2, bpKnobSize + 8, bpKnobSize + 8); }
   fill(beamOpacitySliderDragging ? theme.accent : theme.text);
   stroke(theme.accent);
@@ -1902,7 +2046,7 @@ void drawMapSettings(float px, float py) {
   strokeWeight(1);
   rect(bwSliderX, bwY - 2, bwSliderW, bwSliderH, 2);
   float bwKnobX = map(beamPatternBeamWidth, 10.0, 120.0, bwSliderX, bwSliderX + bwSliderW);
-  boolean bwHover = dist(mouseX, mouseY, bwKnobX, bwY - 2 + bwSliderH/2) < bwKnobSize;
+  boolean bwHover = dist(scaledMouseX, scaledMouseY, bwKnobX, bwY - 2 + bwSliderH/2) < bwKnobSize;
   if (bwHover || beamWidthSliderDragging) { fill(theme.accent, 60); noStroke(); ellipse(bwKnobX, bwY - 2 + bwSliderH/2, bwKnobSize + 8, bwKnobSize + 8); }
   fill(beamWidthSliderDragging ? theme.accent : theme.text);
   stroke(theme.accent);
@@ -1929,7 +2073,7 @@ void drawLookSettings(float px, float py) {
   
   for (int i = 0; i < themeNames.length; i++) {
     float tbx = px + 30 + i * (themeBtnW + themeBtnGap);
-    boolean tHover = mouseX > tbx && mouseX < tbx + themeBtnW && mouseY > themeBtnY && mouseY < themeBtnY + themeBtnH;
+    boolean tHover = scaledMouseX > tbx && scaledMouseX < tbx + themeBtnW && scaledMouseY > themeBtnY && scaledMouseY < themeBtnY + themeBtnH;
     boolean tActive = (currentThemeIdx == i);
     
     fill(tActive ? theme.accent : tHover ? theme.hover : theme.secondary);
@@ -1976,7 +2120,7 @@ void drawPreferencesSettings(float px, float py) {
   
   // ── Pulsanti Salva/Reset ────────────────────────────────────────────────
   float btnY = sepY + 20;
-  boolean savePrefHover = mouseX > px + 30 && mouseX < px + 160 && mouseY > btnY && mouseY < btnY + 32;
+  boolean savePrefHover = scaledMouseX > px + 30 && scaledMouseX < px + 160 && scaledMouseY > btnY && scaledMouseY < btnY + 32;
   fill(savePrefHover ? lerpColor(theme.success, theme.text, 0.2) : theme.success);
   stroke(theme.success);
   rect(px + 30, btnY, 130, 32, 8);
@@ -1986,7 +2130,7 @@ void drawPreferencesSettings(float px, float py) {
   textAlign(CENTER, CENTER);
   text("Salva Preferenze", px + 95, btnY + 16);
   
-  boolean resetPrefHover = mouseX > px + 175 && mouseX < px + 305 && mouseY > btnY && mouseY < btnY + 32;
+  boolean resetPrefHover = scaledMouseX > px + 175 && scaledMouseX < px + 305 && scaledMouseY > btnY && scaledMouseY < btnY + 32;
   fill(resetPrefHover ? lerpColor(theme.warning, theme.text, 0.2) : theme.warning);
   stroke(theme.warning);
   rect(px + 175, btnY, 130, 32, 8);
@@ -2000,11 +2144,140 @@ void drawPreferencesSettings(float px, float py) {
   text("v" + APP_VERSION + "  |  TX HTTP: " + httpCommandCount + "  |  Errori: " + httpErrorCount, px + 330, btnY + 16);
 }
 
+void drawMacroSettings(float px, float py) {
+  fill(theme.textDim);
+  textFont(fontBold);
+  textSize(11);
+  textAlign(LEFT, CENTER);
+  text("MACRO PRESET AZIMUTH", px + 30, py);
+  
+  fill(theme.textDim);
+  textFont(fontRegular);
+  textSize(9);
+  textAlign(LEFT, CENTER);
+  text("Configura i 5 pulsanti macro nel pannello rotatore", px + 30, py + 18);
+  
+  float fieldH = 26, rowH = 36;
+  float nameW = 160, aziW = 70;
+  
+  // Column headers
+  float hdrY = py + 38;
+  fill(theme.textDim);
+  textFont(fontBold);
+  textSize(9);
+  textAlign(LEFT, CENTER);
+  text("#", px + 30, hdrY);
+  text("NOME", px + 60, hdrY);
+  text("AZIMUTH", px + 235, hdrY);
+  
+  for (int i = 0; i < 5; i++) {
+    float rowY = hdrY + 16 + i * rowH;
+    
+    // Row number
+    fill(theme.accent);
+    textFont(fontBold);
+    textSize(11);
+    textAlign(LEFT, CENTER);
+    text((i + 1) + ".", px + 30, rowY + fieldH/2);
+    
+    // Name field (editingField index 100-104)
+    drawTextField(px + 55, rowY, nameW, fieldH, 100 + i, tempMacroNames[i], "Nome macro");
+    
+    // Azimuth field (editingField index 110-114)
+    drawTextField(px + 230, rowY, aziW, fieldH, 110 + i, str(tempMacroAzimuths[i]), "0-359");
+    
+    // Degrees label
+    fill(theme.textDim);
+    textFont(fontRegular);
+    textSize(10);
+    textAlign(LEFT, CENTER);
+    text("\u00b0", px + 306, rowY + fieldH/2);
+  }
+  
+  // Save Macro button
+  float btnY = hdrY + 16 + 5 * rowH + 8;
+  boolean saveMacroHover = scaledMouseX > px + 30 && scaledMouseX < px + 160 && scaledMouseY > btnY && scaledMouseY < btnY + 32;
+  fill(saveMacroHover ? lerpColor(theme.success, theme.text, 0.2) : theme.success);
+  stroke(theme.success);
+  rect(px + 30, btnY, 130, 32, 8);
+  fill(theme.primary);
+  textFont(fontBold);
+  textSize(10);
+  textAlign(CENTER, CENTER);
+  text("Salva Macro", px + 95, btnY + 16);
+  
+  // Preview of current macros
+  float previewX = px + 350, previewY = py + 38;
+  fill(theme.textDim);
+  textFont(fontBold);
+  textSize(9);
+  textAlign(LEFT, CENTER);
+  text("ANTEPRIMA PULSANTI:", previewX, previewY);
+  
+  for (int i = 0; i < 5; i++) {
+    float bx = previewX + (i % 3) * 96;
+    float by = previewY + 14 + (i / 3) * 44;
+    boolean ph = scaledMouseX > bx && scaledMouseX < bx + 84 && scaledMouseY > by && scaledMouseY < by + 34;
+    fill(ph ? theme.hover : theme.secondary);
+    stroke(theme.border);
+    rect(bx, by, 84, 34, 6);
+    fill(theme.text);
+    textFont(fontBold);
+    textSize(10);
+    textAlign(CENTER, CENTER);
+    String nm = tempMacroNames[i];
+    if (nm != null && nm.length() > 8) nm = nm.substring(0, 7) + ".";
+    text(nm != null ? nm : "", bx + 42, by + 11);
+    fill(theme.accent);
+    textFont(fontRegular);
+    textSize(8);
+    text(tempMacroAzimuths[i] + "\u00b0", bx + 42, by + 24);
+  }
+}
+
+void checkMacroSettingsClick(float px, float py) {
+  float fieldH = 26, rowH = 36;
+  float nameW = 160, aziW = 70;
+  float hdrY = py + 38;
+  
+  for (int i = 0; i < 5; i++) {
+    float rowY = hdrY + 16 + i * rowH;
+    
+    // Name field click
+    if (scaledMouseX > px + 55 && scaledMouseX < px + 55 + nameW && scaledMouseY > rowY && scaledMouseY < rowY + fieldH) {
+      editingField = 100 + i;
+      inputBuffer = tempMacroNames[i] != null ? tempMacroNames[i] : "";
+      return;
+    }
+    
+    // Azimuth field click
+    if (scaledMouseX > px + 230 && scaledMouseX < px + 230 + aziW && scaledMouseY > rowY && scaledMouseY < rowY + fieldH) {
+      editingField = 110 + i;
+      inputBuffer = str(tempMacroAzimuths[i]);
+      return;
+    }
+  }
+  
+  // Save Macro button
+  float btnY = hdrY + 16 + 5 * rowH + 8;
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 160 && scaledMouseY > btnY && scaledMouseY < btnY + 32) {
+    for (int i = 0; i < 5; i++) {
+      macroNames[i] = tempMacroNames[i] != null ? tempMacroNames[i] : macroNames[i];
+      macroAzimuths[i] = tempMacroAzimuths[i];
+    }
+    settings.saveSettings();
+    addNotification("Macro salvate", SUCCESS);
+    return;
+  }
+  
+  editingField = -1;
+}
+
 void drawSettingsButtons(float px, float py) {
   float btnW = 100, btnH = 35;
   float centerX = px + 360;
   
-  boolean saveHover = mouseX > centerX - btnW - 10 && mouseX < centerX - 10 && mouseY > py && mouseY < py + btnH;
+  boolean saveHover = scaledMouseX > centerX - btnW - 10 && scaledMouseX < centerX - 10 && scaledMouseY > py && scaledMouseY < py + btnH;
   fill(saveHover ? lerpColor(theme.success, theme.text, 0.2) : theme.success);
   stroke(theme.success);
   rect(centerX - btnW - 10, py, btnW, btnH, 8);
@@ -2015,7 +2288,7 @@ void drawSettingsButtons(float px, float py) {
   textAlign(CENTER, CENTER);
   text("SALVA", centerX - btnW/2 - 10, py + btnH/2);
   
-  boolean cancelHover = mouseX > centerX + 10 && mouseX < centerX + btnW + 10 && mouseY > py && mouseY < py + btnH;
+  boolean cancelHover = scaledMouseX > centerX + 10 && scaledMouseX < centerX + btnW + 10 && scaledMouseY > py && scaledMouseY < py + btnH;
   fill(cancelHover ? lerpColor(theme.warning, theme.text, 0.2) : theme.warning);
   stroke(theme.warning);
   rect(centerX + 10, py, btnW, btnH, 8);
@@ -2069,7 +2342,7 @@ void drawDebugScreen() {
   }
   
   float btnX = px + pw - 90, btnY = py + ph - 40;
-  boolean clearHover = mouseX > btnX && mouseX < btnX + 70 && mouseY > btnY && mouseY < btnY + 28;
+  boolean clearHover = scaledMouseX > btnX && scaledMouseX < btnX + 70 && scaledMouseY > btnY && scaledMouseY < btnY + 28;
   
   fill(clearHover ? lerpColor(theme.warning, theme.text, 0.2) : theme.warning);
   stroke(theme.warning);
@@ -2119,7 +2392,7 @@ void drawPanel(float x, float y, float w, float h, String title, boolean showGlo
 // ─── Checkbox con etichetta (overload con label) ─────────────────────────
 void drawCheckbox(String label, boolean checked, float x, float y) {
   float size = 18;
-  boolean hover = mouseX > x && mouseX < x + size && mouseY > y && mouseY < y + size;
+  boolean hover = scaledMouseX > x && scaledMouseX < x + size && scaledMouseY > y && scaledMouseY < y + size;
   
   fill(checked ? theme.accent : hover ? theme.hover : theme.panel);
   stroke(checked ? theme.accent : theme.border);
@@ -2213,11 +2486,11 @@ void applyTheme(int idx) {
 void drawTopBar() {
   fill(theme.secondary);
   noStroke();
-  rect(0, 0, width, 45);
+  rect(0, 0, 800, 45);
   
   stroke(theme.border);
   strokeWeight(1);
-  line(0, 45, width, 45);
+  line(0, 45, 800, 45);
   
   fill(theme.accent);
   textFont(fontLarge);
@@ -2230,7 +2503,7 @@ void drawTopBar() {
   textSize(9);
   text("v" + APP_VERSION, 195, 22);
   
-  float ledX = width - 310;
+  float ledX = 800 - 310;
   float pulse = 0.5 + 0.5 * sin(millis() * 0.005);
   
   // ANT LED
@@ -2253,7 +2526,7 @@ void drawTopBar() {
   fill(theme.text);
   text("ROT: " + (rotConnected ? "OK" : "Disc."), ledX2 + 12, 22);
   
-  drawPowerSwitch(width - 75, 12);
+  drawPowerSwitch(800 - 75, 12);
 }
 
 void drawPowerSwitch(float x, float y) {
@@ -2293,13 +2566,13 @@ void drawPowerSwitch(float x, float y) {
 void drawNavigationBar() {
   String[] items = {"CONTROLLO", "IMPOSTAZIONI", "DEBUG"};
   float barW = 320, barH = 40;
-  float startX = (width - barW) / 2;
-  float startY = height - 48;
+  float startX = (800 - barW) / 2;
+  float startY = 600 - 48;
   float itemW = barW / items.length - 8;
   
   for (int i = 0; i < items.length; i++) {
     float ix = startX + i * (itemW + 8);
-    boolean hover = mouseX > ix && mouseX < ix + itemW && mouseY > startY && mouseY < startY + barH;
+    boolean hover = scaledMouseX > ix && scaledMouseX < ix + itemW && scaledMouseY > startY && scaledMouseY < startY + barH;
     boolean active = (currentScreen == i);
     
     buttonHover[23 + i] = hover;
@@ -2341,10 +2614,14 @@ void drawNavigationBar() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 void mousePressed() {
+  scaledMouseX = mouseX / scaleFactor;
+  scaledMouseY = mouseY / scaleFactor;
+  
   if (currentScreen == 0) {
     checkAntennaClick();
     checkRotatorPowerClick();
     checkRotatorButtonsPressed();
+    checkMacroButtonsClick();
     checkAzimuthDialClick();
   } else if (currentScreen == 1) {
     checkSettingsClick();
@@ -2386,6 +2663,9 @@ void mouseReleased() {
 }
 
 void mouseDragged() {
+  scaledMouseX = mouseX / scaleFactor;
+  scaledMouseY = mouseY / scaleFactor;
+  
   // Handle brake delay slider in rotator panel (screen 0, showBrakeControls)
   if (currentScreen == 0 && showBrakeControls) {
     float centerX = mapCenterX;
@@ -2397,11 +2677,11 @@ void mouseDragged() {
     
     // Brake delay knob
     float brakeKnobX = map(brakeDelayMs, brakeDelayMin, brakeDelayMax, sliderX, sliderX + sliderW);
-    if (!brakeSliderDragging && dist(mouseX, mouseY, brakeKnobX, brakeSliderY + sliderH/2) < knobSize) {
+    if (!brakeSliderDragging && dist(scaledMouseX, scaledMouseY, brakeKnobX, brakeSliderY + sliderH/2) < knobSize) {
       brakeSliderDragging = true;
     }
     if (brakeSliderDragging) {
-      float newValue = map(constrain(mouseX, sliderX, sliderX + sliderW), sliderX, sliderX + sliderW, brakeDelayMin, brakeDelayMax);
+      float newValue = map(constrain(scaledMouseX, sliderX, sliderX + sliderW), sliderX, sliderX + sliderW, brakeDelayMin, brakeDelayMax);
       brakeDelayMs = int(newValue / 50) * 50;
       brakeDelayMs = constrain(brakeDelayMs, brakeDelayMin, brakeDelayMax);
       return;
@@ -2422,11 +2702,11 @@ void mouseDragged() {
     float maKnobX = map(mapImageAlpha, 0.0, 1.0, maSliderX, maSliderX + maSliderW);
     if (!mapAlphaSliderDragging && !mapZoomSliderDragging && !mapOffsetXSliderDragging && !mapOffsetYSliderDragging
         && !beamOpacitySliderDragging && !beamWidthSliderDragging && showMapImage
-        && dist(mouseX, mouseY, maKnobX, maY - 2 + maSliderH/2) < maKnobSize) {
+        && dist(scaledMouseX, scaledMouseY, maKnobX, maY - 2 + maSliderH/2) < maKnobSize) {
       mapAlphaSliderDragging = true;
     }
     if (mapAlphaSliderDragging) {
-      mapImageAlpha = map(constrain(mouseX, maSliderX, maSliderX + maSliderW), maSliderX, maSliderX + maSliderW, 0.0, 1.0);
+      mapImageAlpha = map(constrain(scaledMouseX, maSliderX, maSliderX + maSliderW), maSliderX, maSliderX + maSliderW, 0.0, 1.0);
       mapImageAlpha = constrain(mapImageAlpha, 0.0, 1.0);
       return;
     }
@@ -2436,11 +2716,11 @@ void mouseDragged() {
     float zKnobX = map(mapZoom, 0.5, 2.5, zSliderX, zSliderX + zSliderW);
     if (!mapAlphaSliderDragging && !mapZoomSliderDragging && !mapOffsetXSliderDragging && !mapOffsetYSliderDragging
         && !beamOpacitySliderDragging && !beamWidthSliderDragging
-        && dist(mouseX, mouseY, zKnobX, zY - 2 + zSliderH/2) < zKnobSize) {
+        && dist(scaledMouseX, scaledMouseY, zKnobX, zY - 2 + zSliderH/2) < zKnobSize) {
       mapZoomSliderDragging = true;
     }
     if (mapZoomSliderDragging) {
-      mapZoom = map(constrain(mouseX, zSliderX, zSliderX + zSliderW), zSliderX, zSliderX + zSliderW, 0.5, 2.5);
+      mapZoom = map(constrain(scaledMouseX, zSliderX, zSliderX + zSliderW), zSliderX, zSliderX + zSliderW, 0.5, 2.5);
       mapZoom = constrain(mapZoom, 0.5, 2.5);
       return;
     }
@@ -2450,11 +2730,11 @@ void mouseDragged() {
     float oxKnobX = map(mapOffsetX, -100, 100, oxSliderX, oxSliderX + oxSliderW);
     if (!mapAlphaSliderDragging && !mapZoomSliderDragging && !mapOffsetXSliderDragging && !mapOffsetYSliderDragging
         && !beamOpacitySliderDragging && !beamWidthSliderDragging
-        && dist(mouseX, mouseY, oxKnobX, oxY - 2 + oxSliderH/2) < oxKnobSize) {
+        && dist(scaledMouseX, scaledMouseY, oxKnobX, oxY - 2 + oxSliderH/2) < oxKnobSize) {
       mapOffsetXSliderDragging = true;
     }
     if (mapOffsetXSliderDragging) {
-      mapOffsetX = map(constrain(mouseX, oxSliderX, oxSliderX + oxSliderW), oxSliderX, oxSliderX + oxSliderW, -100, 100);
+      mapOffsetX = map(constrain(scaledMouseX, oxSliderX, oxSliderX + oxSliderW), oxSliderX, oxSliderX + oxSliderW, -100, 100);
       mapOffsetX = constrain(mapOffsetX, -100, 100);
       return;
     }
@@ -2464,11 +2744,11 @@ void mouseDragged() {
     float oyKnobX = map(mapOffsetY, -100, 100, oySliderX, oySliderX + oySliderW);
     if (!mapAlphaSliderDragging && !mapZoomSliderDragging && !mapOffsetXSliderDragging && !mapOffsetYSliderDragging
         && !beamOpacitySliderDragging && !beamWidthSliderDragging
-        && dist(mouseX, mouseY, oyKnobX, oyY - 2 + oySliderH/2) < oyKnobSize) {
+        && dist(scaledMouseX, scaledMouseY, oyKnobX, oyY - 2 + oySliderH/2) < oyKnobSize) {
       mapOffsetYSliderDragging = true;
     }
     if (mapOffsetYSliderDragging) {
-      mapOffsetY = map(constrain(mouseX, oySliderX, oySliderX + oySliderW), oySliderX, oySliderX + oySliderW, -100, 100);
+      mapOffsetY = map(constrain(scaledMouseX, oySliderX, oySliderX + oySliderW), oySliderX, oySliderX + oySliderW, -100, 100);
       mapOffsetY = constrain(mapOffsetY, -100, 100);
       return;
     }
@@ -2482,11 +2762,11 @@ void mouseDragged() {
     float bpKnobX = map(beamPatternOpacity, 0.0, 1.0, bpSliderX, bpSliderX + bpSliderW);
     if (!mapAlphaSliderDragging && !mapZoomSliderDragging && !mapOffsetXSliderDragging && !mapOffsetYSliderDragging
         && !beamOpacitySliderDragging && !beamWidthSliderDragging
-        && dist(mouseX, mouseY, bpKnobX, bpY - 2 + bpSliderH/2) < bpKnobSize) {
+        && dist(scaledMouseX, scaledMouseY, bpKnobX, bpY - 2 + bpSliderH/2) < bpKnobSize) {
       beamOpacitySliderDragging = true;
     }
     if (beamOpacitySliderDragging) {
-      beamPatternOpacity = map(constrain(mouseX, bpSliderX, bpSliderX + bpSliderW), bpSliderX, bpSliderX + bpSliderW, 0.0, 1.0);
+      beamPatternOpacity = map(constrain(scaledMouseX, bpSliderX, bpSliderX + bpSliderW), bpSliderX, bpSliderX + bpSliderW, 0.0, 1.0);
       beamPatternOpacity = constrain(beamPatternOpacity, 0.0, 1.0);
       return;
     }
@@ -2497,11 +2777,11 @@ void mouseDragged() {
     float bwKnobX = map(beamPatternBeamWidth, 10.0, 120.0, bwSliderX, bwSliderX + bwSliderW);
     if (!mapAlphaSliderDragging && !mapZoomSliderDragging && !mapOffsetXSliderDragging && !mapOffsetYSliderDragging
         && !beamOpacitySliderDragging && !beamWidthSliderDragging
-        && dist(mouseX, mouseY, bwKnobX, bwY - 2 + bwSliderH/2) < bwKnobSize) {
+        && dist(scaledMouseX, scaledMouseY, bwKnobX, bwY - 2 + bwSliderH/2) < bwKnobSize) {
       beamWidthSliderDragging = true;
     }
     if (beamWidthSliderDragging) {
-      beamPatternBeamWidth = map(constrain(mouseX, bwSliderX, bwSliderX + bwSliderW), bwSliderX, bwSliderX + bwSliderW, 10.0, 120.0);
+      beamPatternBeamWidth = map(constrain(scaledMouseX, bwSliderX, bwSliderX + bwSliderW), bwSliderX, bwSliderX + bwSliderW, 10.0, 120.0);
       beamPatternBeamWidth = constrain(beamPatternBeamWidth, 10.0, 120.0);
       return;
     }
@@ -2519,7 +2799,7 @@ void checkRotatorPowerClick() {
   float x = px + 20, y = py + 45;
   float w = 120, h = 30;
   
-  if (mouseX > x && mouseX < x + w && mouseY > y && mouseY < y + h) {
+  if (scaledMouseX > x && scaledMouseX < x + w && scaledMouseY > y && scaledMouseY < y + h) {
     toggleRotatorPower();
   }
 }
@@ -2616,22 +2896,22 @@ void checkRotatorButtonsPressed() {
     float startX = centerX - totalWidth / 2;
     
     // CCW
-    if (mouseX > startX && mouseX < startX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
+    if (scaledMouseX > startX && scaledMouseX < startX + btnW && scaledMouseY > btnY && scaledMouseY < btnY + btnH) {
       activateCCWRelay(); return;
     }
     // HALT
     float haltX = startX + btnW + gap;
-    if (mouseX > haltX && mouseX < haltX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
+    if (scaledMouseX > haltX && scaledMouseX < haltX + btnW && scaledMouseY > btnY && scaledMouseY < btnY + btnH) {
       emergencyHalt(); return;
     }
     // FRENO
     float brakeX = startX + (btnW + gap) * 2;
-    if (mouseX > brakeX && mouseX < brakeX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
+    if (scaledMouseX > brakeX && scaledMouseX < brakeX + btnW && scaledMouseY > btnY && scaledMouseY < btnY + btnH) {
       activateBrake(); return;
     }
     // CW
     float cwX = startX + (btnW + gap) * 3;
-    if (mouseX > cwX && mouseX < cwX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
+    if (scaledMouseX > cwX && scaledMouseX < cwX + btnW && scaledMouseY > btnY && scaledMouseY < btnY + btnH) {
       activateCWRelay(); return;
     }
     
@@ -2642,17 +2922,17 @@ void checkRotatorButtonsPressed() {
     float startX = centerX - totalWidth / 2;
     
     // CCW
-    if (mouseX > startX && mouseX < startX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
+    if (scaledMouseX > startX && scaledMouseX < startX + btnW && scaledMouseY > btnY && scaledMouseY < btnY + btnH) {
       activateCCWRelay(); return;
     }
     // HALT
     float haltX = startX + btnW + gap;
-    if (mouseX > haltX && mouseX < haltX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
+    if (scaledMouseX > haltX && scaledMouseX < haltX + btnW && scaledMouseY > btnY && scaledMouseY < btnY + btnH) {
       emergencyHalt(); return;
     }
     // CW
     float cwX = startX + (btnW + gap) * 2;
-    if (mouseX > cwX && mouseX < cwX + btnW && mouseY > btnY && mouseY < btnY + btnH) {
+    if (scaledMouseX > cwX && scaledMouseX < cwX + btnW && scaledMouseY > btnY && scaledMouseY < btnY + btnH) {
       activateCWRelay(); return;
     }
   }
@@ -2675,12 +2955,49 @@ void activateBrake() {
   }
 }
 
+void checkMacroButtonsClick() {
+  if (!systemOn || !rotatorPowerOn) return;
+  
+  float centerX = mapCenterX;
+  float macroY = mapCenterY + 215;
+  float macroW = 76, macroH = 32, macroGap = 6;
+  float totalW = macroW * 5 + macroGap * 4;
+  float startX = centerX - totalW / 2;
+  
+  for (int i = 0; i < 5; i++) {
+    float bx = startX + i * (macroW + macroGap);
+    if (scaledMouseX > bx && scaledMouseX < bx + macroW && scaledMouseY > macroY && scaledMouseY < macroY + macroH) {
+      activateMacroGoTo(i);
+      return;
+    }
+  }
+}
+
+void activateMacroGoTo(int idx) {
+  float targetDeg = macroAzimuths[idx];
+  float target = gotoWithOverlap(targetDeg);
+  
+  targetAzimuth = target;
+  goToActive = true;
+  goToTarget = target;
+  
+  if (!brakeReleased) {
+    brakeReleased = true;
+    sendRotatorCommand("BRAKE:1");
+    addDebugLog("Brake: Auto-released for macro GOTO");
+  }
+  
+  sendRotatorCommand("GOTO:" + nf(target, 1, 1));
+  addDebugLog("MACRO GOTO: " + macroNames[idx] + " = " + nf(targetDeg, 1, 1) + "\u00b0 (cmd=" + nf(target, 1, 1) + "\u00b0)");
+  addNotification("Macro: " + macroNames[idx] + " " + targetDeg + "\u00b0", SUCCESS);
+}
+
 void checkAzimuthDialClick() {
   if (!systemOn || !rotatorPowerOn) return;
   
   // Check if click is inside the azimuth dial circle
-  float dx = mouseX - mapCenterX;
-  float dy = mouseY - mapCenterY;
+  float dx = scaledMouseX - mapCenterX;
+  float dy = scaledMouseY - mapCenterY;
   float distance = sqrt(dx * dx + dy * dy);
   
   // Only respond to clicks within the outer ring (outside center circle)
@@ -2691,10 +3008,12 @@ void checkAzimuthDialClick() {
     if (degrees < 0) degrees += 360;
     if (degrees >= 360) degrees -= 360;
     
-    // Set target azimuth
-    targetAzimuth = degrees;
+    // Apply overlap-aware GoTo logic
+    float target = gotoWithOverlap(degrees);
+    
+    targetAzimuth = target;
     goToActive = true;
-    goToTarget = degrees;
+    goToTarget = target;
     
     // Auto-activate brake release for Go To
     if (!brakeReleased) {
@@ -2705,9 +3024,33 @@ void checkAzimuthDialClick() {
     
     // Send GOTO command
     sendRotatorCommand("GOTO:" + nf(targetAzimuth, 1, 1));
-    addDebugLog("GOTO: Target set to " + nf(targetAzimuth, 1, 1) + "°");
-    addNotification("Target: " + nf(targetAzimuth, 1, 1) + "°", SUCCESS);
+    addDebugLog("GOTO: Target set to " + nf(targetAzimuth, 1, 1) + "\u00b0");
+    addNotification("Target: " + nf(targetAzimuth, 1, 1) + "\u00b0", SUCCESS);
   }
+}
+
+// Returns the adjusted target azimuth using overlap-zone logic.
+// If going CW and crossing North (overlap zone 360-450), use target+360.
+// Only applies when the rotator is not already positioned in the overlap zone.
+float gotoWithOverlap(float target) {
+  float current = currentAzimuth % 360;
+  if (current < 0) current += 360;
+  
+  float cw  = (target - current + 360) % 360;
+  float ccw = (current - target + 360) % 360;
+  
+  // Apply overlap routing only when not already in the overlap zone (>=360)
+  if (cw <= ccw && currentAzimuth < 360) {
+    // CW path is shorter and rotator is in normal 0-359 range
+    if (current > 270 && target < 90) {
+      // CW path crosses North: route through overlap zone (e.g., 50° → 410°)
+      float adjusted = target + 360;
+      addNotification("GoTo " + int(target) + "\u00b0 via overlap", INFO);
+      addDebugLog("GOTO: overlap route, adjusted = " + adjusted + "\u00b0");
+      return adjusted;
+    }
+  }
+  return target;
 }
 
 void emergencyHalt() {
@@ -2749,7 +3092,7 @@ void checkAntennaClick() {
     float bx = startX + col * (btnW + gapX);
     float by = startY + row * (btnH + gapY);
     
-    if (mouseX > bx && mouseX < bx + btnW && mouseY > by && mouseY < by + btnH) {
+    if (scaledMouseX > bx && scaledMouseX < bx + btnW && scaledMouseY > by && scaledMouseY < by + btnH) {
       selectAntenna(i);
       break;
     }
@@ -2781,10 +3124,10 @@ void checkSettingsClick() {
   float px = 40, py = 60;
   
   // Tabs
-  float tabY = py + 45, tabW = 120, tabH = 32, gap = 8;
-  for (int i = 0; i < 5; i++) {
+  float tabY = py + 45, tabW = 100, tabH = 32, gap = 6;
+  for (int i = 0; i < 6; i++) {
     float tx = px + 20 + i * (tabW + gap);
-    if (mouseX > tx && mouseX < tx + tabW && mouseY > tabY && mouseY < tabY + tabH) {
+    if (scaledMouseX > tx && scaledMouseX < tx + tabW && scaledMouseY > tabY && scaledMouseY < tabY + tabH) {
       currentSettingsTab = i;
       editingField = -1;
       return;
@@ -2796,17 +3139,19 @@ void checkSettingsClick() {
   else if (currentSettingsTab == 2) checkMapSettingsClick(px, py + 90);
   else if (currentSettingsTab == 3) checkLookSettingsClick(px, py + 90);
   else if (currentSettingsTab == 4) checkPreferencesSettingsClick(px, py + 90);
+  else if (currentSettingsTab == 5) checkMacroSettingsClick(px, py + 90);
   
   // Salva/Annulla (only visible and active for Antenne tab)
   if (currentSettingsTab == 1) {
-    float btnY = py + 350, centerX = px + 360, btnW = 100, btnH = 35;
+    float ph = 400;
+    float btnY = py + ph - 50, centerX = px + 360, btnW = 100, btnH = 35;
     
-    if (mouseX > centerX - btnW - 10 && mouseX < centerX - 10 && mouseY > btnY && mouseY < btnY + btnH) {
+    if (scaledMouseX > centerX - btnW - 10 && scaledMouseX < centerX - 10 && scaledMouseY > btnY && scaledMouseY < btnY + btnH) {
       saveSettings();
       return;
     }
     
-    if (mouseX > centerX + 10 && mouseX < centerX + btnW + 10 && mouseY > btnY && mouseY < btnY + btnH) {
+    if (scaledMouseX > centerX + 10 && scaledMouseX < centerX + btnW + 10 && scaledMouseY > btnY && scaledMouseY < btnY + btnH) {
       cancelSettings();
       return;
     }
@@ -2819,19 +3164,19 @@ void checkAntennaSettingsClick(float px, float py) {
   for (int i = 0; i < 6; i++) {
     float rowY = py + 25 + i * rowH;
     
-    if (mouseX > px + 100 && mouseX < px + 100 + fieldW && mouseY > rowY && mouseY < rowY + fieldH) {
+    if (scaledMouseX > px + 100 && scaledMouseX < px + 100 + fieldW && scaledMouseY > rowY && scaledMouseY < rowY + fieldH) {
       editingField = i;
       inputBuffer = tempAntennaNames[i];
       return;
     }
     
-    if (mouseX > px + 250 && mouseX < px + 300 && mouseY > rowY && mouseY < rowY + fieldH) {
+    if (scaledMouseX > px + 250 && scaledMouseX < px + 300 && scaledMouseY > rowY && scaledMouseY < rowY + fieldH) {
       editingField = i + 10;
       inputBuffer = str(tempAntennaPins[i]);
       return;
     }
     
-    if (mouseX > px + 320 && mouseX < px + 338 && mouseY > rowY + 5 && mouseY < rowY + 23) {
+    if (scaledMouseX > px + 320 && scaledMouseX < px + 338 && scaledMouseY > rowY + 5 && scaledMouseY < rowY + 23) {
       tempAntennaDirective[i] = ! tempAntennaDirective[i];
       return;
     }
@@ -2847,13 +3192,13 @@ void checkConnectionSettingsClick(float px, float py) {
   float toggleY = py + 25;
   
   // ANT USB/WiFi toggle
-  if (mouseX > px + 30 && mouseX < px + 30 + toggleW && mouseY > toggleY && mouseY < toggleY + toggleH) {
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 30 + toggleW && scaledMouseY > toggleY && scaledMouseY < toggleY + toggleH) {
     antConnMode = 0;
     addDebugLog("ESP32 Antenna: modo USB");
     return;
   }
   
-  if (mouseX > px + 30 + toggleW + toggleGap && mouseX < px + 30 + toggleW * 2 + toggleGap && mouseY > toggleY && mouseY < toggleY + toggleH) {
+  if (scaledMouseX > px + 30 + toggleW + toggleGap && scaledMouseX < px + 30 + toggleW * 2 + toggleGap && scaledMouseY > toggleY && scaledMouseY < toggleY + toggleH) {
     antConnMode = 1;
     addDebugLog("ESP32 Antenna: modo WiFi");
     return;
@@ -2865,7 +3210,7 @@ void checkConnectionSettingsClick(float px, float py) {
     float portBtnW = 70, portBtnH = 22;
     for (int i = 0; i < min(availablePorts.length, 4); i++) {
       float pbx = px + 120 + i * (portBtnW + 5);
-      if (mouseX > pbx && mouseX < pbx + portBtnW && mouseY > configY - 11 && mouseY < configY + 11) {
+      if (scaledMouseX > pbx && scaledMouseX < pbx + portBtnW && scaledMouseY > configY - 11 && scaledMouseY < configY + 11) {
         antComPort = availablePorts[i];
         addDebugLog("ESP32 Antenna porta: " + antComPort);
         return;
@@ -2878,14 +3223,14 @@ void checkConnectionSettingsClick(float px, float py) {
     float configY = toggleY + 35;
     
     // IP field click (new position: px+56 to px+186)
-    if (mouseX > px + 56 && mouseX < px + 186 && mouseY > configY && mouseY < configY + 26) {
+    if (scaledMouseX > px + 56 && scaledMouseX < px + 186 && scaledMouseY > configY && scaledMouseY < configY + 26) {
       editingField = 20;
       inputBuffer = antWifiIP;
       return;
     }
     
     // Port field click (new position: px+238 to px+308)
-    if (mouseX > px + 238 && mouseX < px + 308 && mouseY > configY && mouseY < configY + 26) {
+    if (scaledMouseX > px + 238 && scaledMouseX < px + 308 && scaledMouseY > configY && scaledMouseY < configY + 26) {
       editingField = 21;
       inputBuffer = str(antWifiPort);
       return;
@@ -2895,7 +3240,7 @@ void checkConnectionSettingsClick(float px, float py) {
   // ANT Connect/Disconnect
   float configY = toggleY + 35;
   float antBtnY = configY + 30;
-  if (mouseX > px + 30 && mouseX < px + 150 && mouseY > antBtnY && mouseY < antBtnY + 32) {
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 150 && scaledMouseY > antBtnY && scaledMouseY < antBtnY + 32) {
     if (antConnected) disconnectAntESP32();
     else connectAntESP32();
     return;
@@ -2906,13 +3251,13 @@ void checkConnectionSettingsClick(float px, float py) {
   float rotToggleY = rotY + 25;
   
   // ROT USB/WiFi toggle
-  if (mouseX > px + 30 && mouseX < px + 30 + toggleW && mouseY > rotToggleY && mouseY < rotToggleY + toggleH) {
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 30 + toggleW && scaledMouseY > rotToggleY && scaledMouseY < rotToggleY + toggleH) {
     rotConnMode = 0;
     addDebugLog("ESP32 Rotatore: modo USB");
     return;
   }
   
-  if (mouseX > px + 30 + toggleW + toggleGap && mouseX < px + 30 + toggleW * 2 + toggleGap && mouseY > rotToggleY && mouseY < rotToggleY + toggleH) {
+  if (scaledMouseX > px + 30 + toggleW + toggleGap && scaledMouseX < px + 30 + toggleW * 2 + toggleGap && scaledMouseY > rotToggleY && scaledMouseY < rotToggleY + toggleH) {
     rotConnMode = 1;
     addDebugLog("ESP32 Rotatore: modo WiFi");
     return;
@@ -2924,7 +3269,7 @@ void checkConnectionSettingsClick(float px, float py) {
     float portBtnW = 70, portBtnH = 22;
     for (int i = 0; i < min(availablePorts.length, 4); i++) {
       float pbx = px + 120 + i * (portBtnW + 5);
-      if (mouseX > pbx && mouseX < pbx + portBtnW && mouseY > rotConfigY - 11 && mouseY < rotConfigY + 11) {
+      if (scaledMouseX > pbx && scaledMouseX < pbx + portBtnW && scaledMouseY > rotConfigY - 11 && scaledMouseY < rotConfigY + 11) {
         rotComPort = availablePorts[i];
         addDebugLog("ESP32 Rotatore porta: " + rotComPort);
         return;
@@ -2937,14 +3282,14 @@ void checkConnectionSettingsClick(float px, float py) {
     float rotConfigY = rotToggleY + 35;
     
     // IP field click (new position: px+56 to px+186)
-    if (mouseX > px + 56 && mouseX < px + 186 && mouseY > rotConfigY && mouseY < rotConfigY + 26) {
+    if (scaledMouseX > px + 56 && scaledMouseX < px + 186 && scaledMouseY > rotConfigY && scaledMouseY < rotConfigY + 26) {
       editingField = 22;
       inputBuffer = rotWifiIP;
       return;
     }
     
     // Port field click (new position: px+238 to px+308)
-    if (mouseX > px + 238 && mouseX < px + 308 && mouseY > rotConfigY && mouseY < rotConfigY + 26) {
+    if (scaledMouseX > px + 238 && scaledMouseX < px + 308 && scaledMouseY > rotConfigY && scaledMouseY < rotConfigY + 26) {
       editingField = 23;
       inputBuffer = str(rotWifiPort);
       return;
@@ -2954,7 +3299,7 @@ void checkConnectionSettingsClick(float px, float py) {
   // ROT Connect/Disconnect
   float rotConfigY = rotToggleY + 35;
   float rotBtnY = rotConfigY + 30;
-  if (mouseX > px + 30 && mouseX < px + 150 && mouseY > rotBtnY && mouseY < rotBtnY + 32) {
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 150 && scaledMouseY > rotBtnY && scaledMouseY < rotBtnY + 32) {
     if (rotConnected) disconnectRotESP32();
     else connectRotESP32();
     return;
@@ -2962,7 +3307,7 @@ void checkConnectionSettingsClick(float px, float py) {
   
   // Scan Ports (new y: rotBtnY + 50)
   float scanBtnY = rotBtnY + 50;
-  if (mouseX > px + 30 && mouseX < px + 130 && mouseY > scanBtnY && mouseY < scanBtnY + 28) {
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 130 && scaledMouseY > scanBtnY && scaledMouseY < scanBtnY + 28) {
     scanSerialPorts();
     addNotification("Porte scansionate", INFO);
     return;
@@ -2973,7 +3318,7 @@ void checkMapSettingsClick(float px, float py) {
   float size = 18;
   
   // Mostra immagine mappa checkbox
-  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > py && mouseY < py + size) {
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 30 + size && scaledMouseY > py && scaledMouseY < py + size) {
     showMapImage = !showMapImage;
     settings.saveSettings();
     addDebugLog("Mappa quadrante: " + (showMapImage ? "ON" : "OFF"));
@@ -2982,13 +3327,13 @@ void checkMapSettingsClick(float px, float py) {
   
   // Sfoglia button (PNG/JPG)
   float pathY = py + 28;
-  if (mouseX > px + 360 && mouseX < px + 420 && mouseY > pathY - 4 && mouseY < pathY + 18) {
+  if (scaledMouseX > px + 360 && scaledMouseX < px + 420 && scaledMouseY > pathY - 4 && scaledMouseY < pathY + 18) {
     selectInput("Seleziona immagine mappa (PNG/JPG)", "mapImageSelected");
     return;
   }
   
   // PDF info button
-  if (mouseX > px + 428 && mouseX < px + 488 && mouseY > pathY - 4 && mouseY < pathY + 18) {
+  if (scaledMouseX > px + 428 && scaledMouseX < px + 488 && scaledMouseY > pathY - 4 && scaledMouseY < pathY + 18) {
     addNotification("PDF: converti a PNG/JPG prima", WARNING);
     addDebugLog("Info PDF: Processing non supporta PDF nativamente.");
     addDebugLog("  Scarica la mappa da ns6t.net/azimuth, poi converti");
@@ -3004,7 +3349,7 @@ void checkMapSettingsClick(float px, float py) {
   float oyY = oxY + 22;
   
   // Reset offset button (same bounds as hover: px+360 to px+440, oxY-2 to oxY+40)
-  if (mouseX > px + 360 && mouseX < px + 440 && mouseY > oxY - 2 && mouseY < oxY + 40) {
+  if (scaledMouseX > px + 360 && scaledMouseX < px + 440 && scaledMouseY > oxY - 2 && scaledMouseY < oxY + 40) {
     mapOffsetX = 0;
     mapOffsetY = 0;
     rebuildMaskedMap();
@@ -3018,7 +3363,7 @@ void checkMapSettingsClick(float px, float py) {
   float rowH = 26;
   
   // Mostra controlli freno
-  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > chkY && mouseY < chkY + size) {
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 30 + size && scaledMouseY > chkY && scaledMouseY < chkY + size) {
     showBrakeControls = !showBrakeControls;
     settings.saveSettings();
     addDebugLog("Controllo Freno: " + (showBrakeControls ? "ON" : "OFF"));
@@ -3027,21 +3372,21 @@ void checkMapSettingsClick(float px, float py) {
   }
   
   // Mostra etichette gradi
-  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > chkY + rowH && mouseY < chkY + rowH + size) {
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 30 + size && scaledMouseY > chkY + rowH && scaledMouseY < chkY + rowH + size) {
     showDegreeLabels = !showDegreeLabels;
     settings.saveSettings();
     return;
   }
   
   // Mostra cardinali
-  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > chkY + rowH * 2 && mouseY < chkY + rowH * 2 + size) {
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 30 + size && scaledMouseY > chkY + rowH * 2 && scaledMouseY < chkY + rowH * 2 + size) {
     showCardinals = !showCardinals;
     settings.saveSettings();
     return;
   }
   
   // Mostra pattern antenna
-  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > chkY + rowH * 3 && mouseY < chkY + rowH * 3 + size) {
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 30 + size && scaledMouseY > chkY + rowH * 3 && scaledMouseY < chkY + rowH * 3 + size) {
     showBeamPattern = !showBeamPattern;
     settings.saveSettings();
     return;
@@ -3055,7 +3400,7 @@ void checkLookSettingsClick(float px, float py) {
   
   for (int i = 0; i < 3; i++) {
     float tbx = px + 30 + i * (themeBtnW + themeBtnGap);
-    if (mouseX > tbx && mouseX < tbx + themeBtnW && mouseY > themeBtnY && mouseY < themeBtnY + themeBtnH) {
+    if (scaledMouseX > tbx && scaledMouseX < tbx + themeBtnW && scaledMouseY > themeBtnY && scaledMouseY < themeBtnY + themeBtnH) {
       applyTheme(i);
       settings.saveSettings();
       addNotification("Tema applicato", SUCCESS);
@@ -3067,14 +3412,14 @@ void checkLookSettingsClick(float px, float py) {
   float rowH = 26;
   
   // Attiva animazioni
-  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > chkY && mouseY < chkY + size) {
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 30 + size && scaledMouseY > chkY && scaledMouseY < chkY + size) {
     showAnimations = !showAnimations;
     settings.saveSettings();
     return;
   }
   
   // Mostra barra stato
-  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > chkY + rowH && mouseY < chkY + rowH + size) {
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 30 + size && scaledMouseY > chkY + rowH && scaledMouseY < chkY + rowH + size) {
     showStatusBarFlag = !showStatusBarFlag;
     settings.saveSettings();
     return;
@@ -3087,38 +3432,38 @@ void checkPreferencesSettingsClick(float px, float py) {
   float y = py;
   
   // disconnectRelaysOnExit
-  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > y && mouseY < y + size) {
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 30 + size && scaledMouseY > y && scaledMouseY < y + size) {
     disconnectRelaysOnExit = !disconnectRelaysOnExit;
     settings.saveSettings();
     return;
   }
   // sendHaltOnExit
-  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > y + rowH && mouseY < y + rowH + size) {
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 30 + size && scaledMouseY > y + rowH && scaledMouseY < y + rowH + size) {
     sendHaltOnExit = !sendHaltOnExit;
     settings.saveSettings();
     return;
   }
   // confirmOnExit
-  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > y + rowH * 2 && mouseY < y + rowH * 2 + size) {
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 30 + size && scaledMouseY > y + rowH * 2 && scaledMouseY < y + rowH * 2 + size) {
     confirmOnExit = !confirmOnExit;
     settings.saveSettings();
     return;
   }
   // autoConnect
-  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > y + rowH * 3 && mouseY < y + rowH * 3 + size) {
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 30 + size && scaledMouseY > y + rowH * 3 && scaledMouseY < y + rowH * 3 + size) {
     autoConnect = !autoConnect;
     settings.saveSettings();
     addNotification("Auto-connect " + (autoConnect ? "attivato" : "disattivato"), autoConnect ? SUCCESS : INFO);
     return;
   }
   // rememberLastAntenna
-  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > y + rowH * 4 && mouseY < y + rowH * 4 + size) {
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 30 + size && scaledMouseY > y + rowH * 4 && scaledMouseY < y + rowH * 4 + size) {
     rememberLastAntenna = !rememberLastAntenna;
     settings.saveSettings();
     return;
   }
   // debugMode
-  if (mouseX > px + 30 && mouseX < px + 30 + size && mouseY > y + rowH * 5 && mouseY < y + rowH * 5 + size) {
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 30 + size && scaledMouseY > y + rowH * 5 && scaledMouseY < y + rowH * 5 + size) {
     debugMode = !debugMode;
     addDebugLog("Debug: " + (debugMode ? "ON" : "OFF"));
     settings.saveSettings();
@@ -3130,14 +3475,14 @@ void checkPreferencesSettingsClick(float px, float py) {
   float btnY = sepY + 20;
   
   // Salva Preferenze
-  if (mouseX > px + 30 && mouseX < px + 160 && mouseY > btnY && mouseY < btnY + 32) {
+  if (scaledMouseX > px + 30 && scaledMouseX < px + 160 && scaledMouseY > btnY && scaledMouseY < btnY + 32) {
     settings.saveSettings();
     addNotification("Preferenze salvate", SUCCESS);
     return;
   }
   
   // Reset Default
-  if (mouseX > px + 175 && mouseX < px + 305 && mouseY > btnY && mouseY < btnY + 32) {
+  if (scaledMouseX > px + 175 && scaledMouseX < px + 305 && scaledMouseY > btnY && scaledMouseY < btnY + 32) {
     resetToDefaults();
     addNotification("Reset completato", WARNING);
     return;
@@ -3148,16 +3493,16 @@ void checkDebugClick() {
   float px = 40, py = 60, pw = 720, ph = 400;
   float btnX = px + pw - 90, btnY = py + ph - 40;
   
-  if (mouseX > btnX && mouseX < btnX + 70 && mouseY > btnY && mouseY < btnY + 28) {
+  if (scaledMouseX > btnX && scaledMouseX < btnX + 70 && scaledMouseY > btnY && scaledMouseY < btnY + 28) {
     debugLog.clear();
     addDebugLog("Log cancellato");
   }
 }
 
 void checkTopBarClick() {
-  float switchX = width - 75, switchY = 12, switchW = 55, switchH = 22;
+  float switchX = 800 - 75, switchY = 12, switchW = 55, switchH = 22;
   
-  if (mouseX > switchX && mouseX < switchX + switchW && mouseY > switchY && mouseY < switchY + switchH) {
+  if (scaledMouseX > switchX && scaledMouseX < switchX + switchW && scaledMouseY > switchY && scaledMouseY < switchY + switchH) {
     systemOn = !systemOn;
     addDebugLog("Sistema: " + (systemOn ? "ON" : "OFF"));
     
@@ -3176,13 +3521,13 @@ void checkTopBarClick() {
 
 void checkNavigationClick() {
   float barW = 320, barH = 40;
-  float startX = (width - barW) / 2, startY = height - 48;
+  float startX = (800 - barW) / 2, startY = 600 - 48;
   float itemW = barW / 3 - 8;
   
   for (int i = 0; i < 3; i++) {
     float ix = startX + i * (itemW + 8);
     
-    if (mouseX > ix && mouseX < ix + itemW && mouseY > startY && mouseY < startY + barH) {
+    if (scaledMouseX > ix && scaledMouseX < ix + itemW && scaledMouseY > startY && scaledMouseY < startY + barH) {
       if (currentScreen != i) {
         targetScreen = i;
         transitioning = true;
@@ -3233,6 +3578,15 @@ void keyPressed() {
         // rotWifiPort
         inputBuffer += key;
         rotWifiPort = int(inputBuffer);
+      } else if (editingField >= 100 && editingField < 105 && inputBuffer.length() < 10) {
+        // Macro name (max 10 chars)
+        inputBuffer += key;
+        tempMacroNames[editingField - 100] = inputBuffer;
+      } else if (editingField >= 110 && editingField < 115 && key >= '0' && key <= '9' && inputBuffer.length() < 3) {
+        // Macro azimuth (0-359, max 3 digits)
+        inputBuffer += key;
+        int v = int(inputBuffer);
+        if (v <= 359) tempMacroAzimuths[editingField - 110] = v;
       }
     }
     return;
@@ -3260,6 +3614,11 @@ void updateFieldFromBuffer() {
     rotWifiIP = inputBuffer;
   } else if (editingField == 23 && inputBuffer.length() > 0) {
     rotWifiPort = int(inputBuffer);
+  } else if (editingField >= 100 && editingField < 105) {
+    tempMacroNames[editingField - 100] = inputBuffer;
+  } else if (editingField >= 110 && editingField < 115 && inputBuffer.length() > 0) {
+    int v = int(inputBuffer);
+    tempMacroAzimuths[editingField - 110] = constrain(v, 0, 359);
   }
 }
 
