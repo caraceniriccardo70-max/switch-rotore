@@ -2988,7 +2988,7 @@ void activateMacroGoTo(int idx) {
   }
   
   sendRotatorCommand("GOTO:" + nf(target, 1, 1));
-  addDebugLog("MACRO GOTO: " + macroNames[idx] + " = " + targetDeg + "\u00b0 (cmd=" + nf(target,1,1) + "\u00b0)");
+  addDebugLog("MACRO GOTO: " + macroNames[idx] + " = " + nf(targetDeg, 1, 1) + "\u00b0 (cmd=" + nf(target, 1, 1) + "\u00b0)");
   addNotification("Macro: " + macroNames[idx] + " " + targetDeg + "\u00b0", SUCCESS);
 }
 
@@ -3029,8 +3029,9 @@ void checkAzimuthDialClick() {
   }
 }
 
-// Returns the adjusted target azimuth using overlap-zone logic
-// If going CW and crossing North (overlap zone 360-450), use target+360
+// Returns the adjusted target azimuth using overlap-zone logic.
+// If going CW and crossing North (overlap zone 360-450), use target+360.
+// Only applies when the rotator is not already positioned in the overlap zone.
 float gotoWithOverlap(float target) {
   float current = currentAzimuth % 360;
   if (current < 0) current += 360;
@@ -3038,20 +3039,18 @@ float gotoWithOverlap(float target) {
   float cw  = (target - current + 360) % 360;
   float ccw = (current - target + 360) % 360;
   
-  if (cw <= ccw) {
-    // CW path is shorter or equal
+  // Apply overlap routing only when not already in the overlap zone (>=360)
+  if (cw <= ccw && currentAzimuth < 360) {
+    // CW path is shorter and rotator is in normal 0-359 range
     if (current > 270 && target < 90) {
-      // Crosses North via overlap zone → use extended angle
+      // CW path crosses North: route through overlap zone (e.g., 50° → 410°)
       float adjusted = target + 360;
       addNotification("GoTo " + int(target) + "\u00b0 via overlap", INFO);
-      addDebugLog("GOTO: overlap route, adjusted=" + adjusted + "\u00b0");
+      addDebugLog("GOTO: overlap route, adjusted = " + adjusted + "\u00b0");
       return adjusted;
     }
-    return target;
-  } else {
-    // CCW path is shorter
-    return target;
   }
+  return target;
 }
 
 void emergencyHalt() {
