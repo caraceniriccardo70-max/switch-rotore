@@ -1,20 +1,18 @@
 // ═══════════════════════════════════════════════════════════════════════════
-//  ESP32 ANTENNA SWITCH v4.1
+//  ESP32 ANTENNA SWITCH v5.1
 //
 //  PORTE:
-//   80   → HTTP web interface + Espalexa (Alexa)
-//   8080 → TCP raw per app Processing
+//   80   → fauxmoESP standalone (Alexa discovery + comandi)
+//   8080 → HTTP pagina web  → http://IP:8080
+//   8181 → TCP raw per app Processing
 //
 //  COMANDI ALEXA (via Routine app Alexa):
 //   Routine trigger "seleziona DxCommander" → azione: accendi DxCommander
-//   «Alexa, spegni antenne» → nativo, spegne tutto (nessuna Routine)
+//   «Alexa, spegni antenne» → nativo, spegne tutto
 //
-//  COMANDI PROCESSING (TCP porta 8080):
-//   ANT:0  ANT:1 ... ANT:5   → seleziona antenna
-//   OFF                       → spegni tutte
-//   STATUS                    → risponde con stato attuale
-//
-//  LIBRERIA RICHIESTA: "Espalexa" di Aircoookie v2.7.0
+//  LIBRERIE RICHIESTE:
+//   "fauxmoESP"  di Xose Perez  (Gestione Librerie)
+//   "AsyncTCP"   (dipendenza di fauxmoESP, Gestione Librerie)
 // ═══════════════════════════════════════════════════════════════════════════
 
 #include <WiFi.h>
@@ -22,7 +20,7 @@
 #include <WiFiServer.h>
 #include <WiFiClient.h>
 #include <Preferences.h>
-#include <Espalexa.h>
+#include <fauxmoESP.h>
 
 // ══════════════════════════════════════════════════════════════════════════
 //  CONFIGURAZIONE
@@ -65,10 +63,10 @@ unsigned long lastLedUpdate = 0;
 bool          ledState      = false;
 
 Preferences prefs;
-WebServer   server(80);       // HTTP: pagina web + Espalexa
-WiFiServer  tcpServer(8080);  // TCP raw: Processing app
+WebServer   server(8080);    // pagina web porta 8080
+WiFiServer  tcpServer(8181); // Processing porta 8181
 WiFiClient  tcpClient;
-Espalexa    espalexa;
+fauxmoESP   fauxmo;          // Alexa porta 80 standalone
 
 // ══════════════════════════════════════════════════════════════════════════
 //  FORWARD DECLARATIONS
@@ -89,21 +87,59 @@ void updateWiFi();
 void updateLED();
 
 // ══════════════════════════════════════════════════════════════════════════
-//  CALLBACK ALEXA — uno per antenna
-//  «Alexa, accendi X» (via Routine con trigger "seleziona X") → selectAntenna
-//  «Alexa, spegni X»  → spegni tutto
+//  SELEZIONE ANTENNA
 // ══════════════════════════════════════════════════════════════════════════
 
-void alexaCb0(EspalexaDevice* d)   { if (d->getState()) selectAntenna(0);  else selectAntenna(-1); }
-void alexaCb1(EspalexaDevice* d)   { if (d->getState()) selectAntenna(1);  else selectAntenna(-1); }
-void alexaCb2(EspalexaDevice* d)   { if (d->getState()) selectAntenna(2);  else selectAntenna(-1); }
-void alexaCb3(EspalexaDevice* d)   { if (d->getState()) selectAntenna(3);  else selectAntenna(-1); }
-void alexaCb4(EspalexaDevice* d)   { if (d->getState()) selectAntenna(4);  else selectAntenna(-1); }
-void alexaCb5(EspalexaDevice* d)   { if (d->getState()) selectAntenna(5);  else selectAntenna(-1); }
-void alexaCbAll(EspalexaDevice* d) { selectAntenna(-1); } // "Antenne" — spegni tutto
+void selectAntenna(int index) {
+  for (int i = 0; i < NUM_ANTENNAS; i++)
+    digitalWrite(antennaPins[i], RELAY_OFF);
+
+  if (index >= 0 && index < NUM_ANTENNAS) {
+    selectedAntenna = index;
+    digitalWrite(antennaPins[index], RELAY_ON);
+    Serial.println("[ANT] Selezionata: " + antennaNames[index]);
+    if (tcpClient && tcpClient.connected())
+      tcpClient.println("ANT:" + String(index) + ":" + String(antennaPins[index]));
+  } else {
+    selectedAntenna = -1;
+    Serial.println("[ANT] Tutte disattivate");
+    if (tcpClient && tcpClient.connected())
+      tcpClient.println("ANT:-1:0");
+  }
+
+  // Aggiorna stato visibile ad Alexa
+  for (int i = 0; i < NUM_ANTENNAS; i++)
+    fauxmo.setState(i, (i == selectedAntenna), 255);
+  fauxmo.setState(NUM_ANTENNAS, false, 0); // "Antenne" sempre off
+
+  prefs.begin("antswitch", false);
+  prefs.putInt("sel", selectedAntenna);
+  prefs.end();
+}
 
 // ══════════════════════════════════════════════════════════════════════════
-//  PAGINA WEB HTML
+//  NVS
+// ══════════════════════════════════════════════════════════════════════════
+
+void loadAntennaNames() {
+  prefs.begin("antswitch", false);
+  for (int i = 0; i < NUM_ANTENNAS; i++) {
+    String key = "aname" + String(i);
+    antennaNames[i] = prefs.getString(key.c_str(), defaultAntennaNames[i]);
+  }
+  prefs.end();
+}
+
+void saveAntennaName(int idx, String name) {
+  if (idx < 0 || idx >= NUM_ANTENNAS) return;
+  antennaNames[idx] = name;
+  prefs.begin("antswitch", false);
+  prefs.putString(("aname" + String(idx)).c_str(), name);
+  prefs.end();
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  PAGINA WEB HTML (porta 8080)
 // ══════════════════════════════════════════════════════════════════════════
 
 const char HTML_PAGE[] PROGMEM = R"rawliteral(
@@ -161,11 +197,11 @@ input[type=text],input[type=password]{width:100%;padding:10px;background:#0a0a0a
 
 <div class="header">
   <h1>🛰️ Antenna Switch Control</h1>
-  <div class="sub">ESP32 v4.1 — Web :80 | Processing TCP :8080 | Alexa 🎙️</div>
+  <div class="sub">ESP32 v5.1 — Web :8080 | Processing TCP :8181 | Alexa :80 🎙️</div>
 </div>
 
 <div class="status">
-  <div class="status-item"><span class="led led-on" id="ledSys"></span><span id="txtSys">Sistema: ON</span></div>
+  <div class="status-item"><span class="led led-on"></span><span>Sistema: ON</span></div>
   <div class="status-item"><span class="led led-on"></span><span>AP: AntennaSwitch-AP</span></div>
   <div class="status-item"><span class="led led-off" id="ledSta"></span><span id="txtSta">Router: --</span></div>
   <div class="status-item"><span>🎯 <strong id="txtAnt">Nessuna</strong></span></div>
@@ -175,13 +211,13 @@ input[type=text],input[type=password]{width:100%;padding:10px;background:#0a0a0a
   <h2>🎙️ Comandi vocali Alexa</h2>
   <div class="alexa-box">
     <strong>Passo 1 — Prima volta:</strong><br>
-    <code>Alexa, trova dispositivi</code><br>
-    <strong>Passo 2 — Crea Routine nell'app Alexa per ogni antenna:</strong><br>
-    Trigger voce: <code>seleziona DxCommander</code> → Azione: accendi DxCommander<br>
-    Trigger voce: <code>seleziona Delta Loop</code> → Azione: accendi Delta Loop<br>
-    <em>(ripeti per tutte le antenne)</em><br>
+    <code>Alexa, trova dispositivi</code> → deve trovare 7 device (6 antenne + Antenne)<br>
+    <strong>Passo 2 — Crea Routine nell'app Alexa (una per antenna):</strong><br>
+    Trigger: <code>seleziona DxCommander</code> → Azione: accendi DxCommander<br>
+    Trigger: <code>seleziona Delta Loop</code> → Azione: accendi Delta Loop<br>
+    <em>...ripeti per tutte le 6 antenne...</em><br>
     <strong>Passo 3 — Usa:</strong><br>
-    <code>Alexa, seleziona DxCommander</code> — oppure — <code>Alexa, spegni antenne</code><br>
+    <code>Alexa, seleziona DxCommander</code> &nbsp;|&nbsp; <code>Alexa, spegni antenne</code><br>
     ⚠ <strong>ESP32 e Alexa devono essere sulla stessa rete WiFi di casa.</strong>
   </div>
 </div>
@@ -197,7 +233,7 @@ input[type=text],input[type=password]{width:100%;padding:10px;background:#0a0a0a
   <div class="rename-grid" id="renameGrid"></div>
   <br>
   <button class="btn" onclick="saveAllNames()">💾 SALVA NOMI</button>
-  <p class="note">⚠ Dopo rinomina: riavvia ESP32 → Alexa, trova dispositivi → ricrea Routine.</p>
+  <p class="note">⚠ Dopo rinomina: riavvia ESP32 → Alexa trova dispositivi → ricrea Routine.</p>
 </div>
 
 <div class="panel">
@@ -223,7 +259,6 @@ let cur=-1;
 function upd(){
   fetch('/status').then(r=>r.json()).then(d=>{
     cur=d.sel;
-    document.getElementById('ledSys').className='led led-on';
     document.getElementById('ledSta').className='led '+(d.staConn?'led-on':'led-off');
     document.getElementById('txtSta').textContent='Router: '+(d.staConn?d.staIP:'Non connesso');
     document.getElementById('txtAnt').textContent=cur>=0?d.ants[cur].name:'Nessuna antenna attiva';
@@ -257,7 +292,8 @@ function upd(){
     document.getElementById('info').innerHTML=
       'AP IP: <strong>192.168.4.1</strong><br>'+
       (d.staConn?'Router IP: <strong>'+d.staIP+'</strong><br>':'')+
-      'Processing TCP: <strong>:8080</strong><br>'+
+      'Alexa: porta <strong>80</strong><br>'+
+      'Processing TCP: porta <strong>8181</strong><br>'+
       'Uptime: <strong>'+up+' min</strong><br>'+
       'Client AP: <strong>'+d.apCli+'</strong>';
   }).catch(e=>console.error(e));
@@ -276,7 +312,7 @@ function saveWiFi(s,p){
   p=p!==undefined?p:document.getElementById('pass').value;
   if(s===''&&p===''){if(!confirm('Disconnettere il router?'))return;}
   fetch('/wifi?s='+encodeURIComponent(s)+'&p='+encodeURIComponent(p))
-    .then(()=>{alert('Operazione avviata...');setTimeout(upd,3000);});
+    .then(()=>{alert('Avviato...');setTimeout(upd,3000);});
 }
 function scan(){
   document.getElementById('scanRes').innerHTML='Scansione...';
@@ -295,86 +331,13 @@ upd();
 )rawliteral";
 
 // ══════════════════════════════════════════════════════════════════════════
-//  NVS
-// ══════════════════════════════════════════════════════════════════════════
-
-void loadAntennaNames() {
-  prefs.begin("antswitch", false);
-  for (int i = 0; i < NUM_ANTENNAS; i++) {
-    String key = "aname" + String(i);
-    antennaNames[i] = prefs.getString(key.c_str(), defaultAntennaNames[i]);
-  }
-  prefs.end();
-}
-
-void saveAntennaName(int idx, String name) {
-  if (idx < 0 || idx >= NUM_ANTENNAS) return;
-  antennaNames[idx] = name;
-  prefs.begin("antswitch", false);
-  prefs.putString(("aname" + String(idx)).c_str(), name);
-  prefs.end();
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-//  SELEZIONE ANTENNA
-// ══════════════════════════════════════════════════════════════════════════
-
-void selectAntenna(int index) {
-  for (int i = 0; i < NUM_ANTENNAS; i++)
-    digitalWrite(antennaPins[i], RELAY_OFF);
-
-  if (index >= 0 && index < NUM_ANTENNAS) {
-    selectedAntenna = index;
-    digitalWrite(antennaPins[index], RELAY_ON);
-    Serial.println("[ANT] Selezionata: " + antennaNames[index]);
-    // Notifica Processing se connesso
-    if (tcpClient && tcpClient.connected())
-      tcpClient.println("ANT:" + String(index) + ":" + String(antennaPins[index]));
-  } else {
-    selectedAntenna = -1;
-    Serial.println("[ANT] Tutte disattivate");
-    if (tcpClient && tcpClient.connected())
-      tcpClient.println("ANT:-1:0");
-  }
-
-  prefs.begin("antswitch", false);
-  prefs.putInt("sel", selectedAntenna);
-  prefs.end();
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-//  SETUP DISPOSITIVI ALEXA
-//  addDevice() in Espalexa v2.7 restituisce uint8_t (indice), non puntatore
-// ══════════════════════════════════════════════════════════════════════════
-
-void setupAlexaDevices() {
-  Serial.println("[ALEXA] Registro dispositivi Alexa:");
-  espalexa.addDevice(antennaNames[0], alexaCb0);
-  Serial.println("  " + antennaNames[0]);
-  espalexa.addDevice(antennaNames[1], alexaCb1);
-  Serial.println("  " + antennaNames[1]);
-  espalexa.addDevice(antennaNames[2], alexaCb2);
-  Serial.println("  " + antennaNames[2]);
-  espalexa.addDevice(antennaNames[3], alexaCb3);
-  Serial.println("  " + antennaNames[3]);
-  espalexa.addDevice(antennaNames[4], alexaCb4);
-  Serial.println("  " + antennaNames[4]);
-  espalexa.addDevice(antennaNames[5], alexaCb5);
-  Serial.println("  " + antennaNames[5]);
-  // Device speciale "Antenne" → spegni tutto con «Alexa, spegni antenne»
-  espalexa.addDevice("Antenne", alexaCbAll);
-  Serial.println("  Antenne (spegni tutto)");
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-//  WEB HANDLERS (porta 80)
+//  WEB HANDLERS (porta 8080)
 // ══════════════════════════════════════════════════════════════════════════
 
 void handleStatus() {
   String json = "{";
-  json += "\"on\":true";
-  json += ",\"sel\":"      + String(selectedAntenna);
-  json += ",\"staConn\":"  + String(staConnected ? "true" : "false");
+  json += "\"sel\":"        + String(selectedAntenna);
+  json += ",\"staConn\":"   + String(staConnected ? "true" : "false");
   json += ",\"staSsid\":\"" + staSSID + "\"";
   json += ",\"staIP\":\""   + (staConnected ? WiFi.localIP().toString() : String("")) + "\"";
   json += ",\"staRssi\":"   + String(WiFi.RSSI());
@@ -437,27 +400,20 @@ void handleRename() {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-//  TCP SERVER (porta 8080) — per app Processing
+//  TCP SERVER porta 8181 — app Processing
 // ══════════════════════════════════════════════════════════════════════════
 
 void handleTCP() {
-  // Accetta nuovi client
   if (tcpServer.hasClient()) {
     if (tcpClient && tcpClient.connected()) tcpClient.stop();
     tcpClient = tcpServer.accept();
     Serial.println("[TCP] Processing connesso: " + tcpClient.remoteIP().toString());
-    // Manda stato attuale al momento della connessione
     tcpClient.println("STATUS:ANT:" + String(selectedAntenna));
   }
-
-  // Leggi comandi dal client connesso
   if (tcpClient && tcpClient.connected() && tcpClient.available()) {
     String cmd = tcpClient.readStringUntil('\n');
     cmd.trim();
-    if (cmd.length() > 0) {
-      Serial.println("[TCP] Ricevuto: " + cmd);
-      processCommand(cmd);
-    }
+    if (cmd.length() > 0) { Serial.println("[TCP] Cmd: " + cmd); processCommand(cmd); }
   }
 }
 
@@ -474,18 +430,14 @@ void handleSerial() {
 }
 
 void processCommand(String cmd) {
-  String cmdUp = cmd;
-  cmdUp.toUpperCase();
-  if (cmdUp.startsWith("ANT:")) {
-    selectAntenna(cmd.substring(4).toInt());
-  } else if (cmdUp == "OFF" || cmdUp == "PWR:0") {
-    selectAntenna(-1);
-  } else if (cmdUp == "STATUS") {
-    String resp = "ANT:" + String(selectedAntenna) +
-                  ":" + (selectedAntenna >= 0 ? antennaNames[selectedAntenna] : "NONE") +
-                  " WIFI:" + (staConnected ? WiFi.localIP().toString() : "NC");
-    Serial.println(resp);
-    if (tcpClient && tcpClient.connected()) tcpClient.println(resp);
+  String up = cmd; up.toUpperCase();
+  if      (up.startsWith("ANT:"))        selectAntenna(cmd.substring(4).toInt());
+  else if (up == "OFF" || up == "PWR:0") selectAntenna(-1);
+  else if (up == "STATUS") {
+    String r = "ANT:" + String(selectedAntenna) + ":" +
+               (selectedAntenna >= 0 ? antennaNames[selectedAntenna] : "NONE");
+    Serial.println(r);
+    if (tcpClient && tcpClient.connected()) tcpClient.println(r);
   }
 }
 
@@ -498,8 +450,7 @@ void updateWiFi() {
   bool now = (WiFi.status() == WL_CONNECTED);
   if (now && !staConnected) {
     staConnected = true;
-    Serial.print("[WiFi] Connesso! IP: ");
-    Serial.println(WiFi.localIP());
+    Serial.print("[WiFi] Connesso! IP: "); Serial.println(WiFi.localIP());
   } else if (!now && staConnected) {
     staConnected = false;
     Serial.println("[WiFi] Disconnesso");
@@ -528,8 +479,8 @@ void setup() {
   delay(500);
 
   Serial.println("═══════════════════════════════════════");
-  Serial.println("  ESP32 ANTENNA SWITCH v4.1");
-  Serial.println("  Web :80  |  Processing TCP :8080");
+  Serial.println("  ESP32 ANTENNA SWITCH v5.1");
+  Serial.println("  Alexa:80 | Web:8080 | TCP:8181");
   Serial.println("═══════════════════════════════════════");
 
   pinMode(LED_PIN, OUTPUT);
@@ -554,8 +505,7 @@ void setup() {
   delay(100);
   WiFi.softAP(AP_SSID, AP_PASSWORD, 1, 0, 4);
   delay(500);
-  Serial.print("[WiFi] AP IP: ");
-  Serial.println(WiFi.softAPIP());
+  Serial.print("[WiFi] AP IP: "); Serial.println(WiFi.softAPIP());
 
   if (staSSID.length() > 0) {
     Serial.print("[WiFi] Connessione a: "); Serial.println(staSSID);
@@ -567,32 +517,50 @@ void setup() {
       staConnected = true;
       Serial.print("[WiFi] Connesso! IP: "); Serial.println(WiFi.localIP());
     } else {
-      Serial.println("[WiFi] Fallito — usa la pagina web per configurare");
+      Serial.println("[WiFi] Fallito — configura dalla pagina web");
     }
   }
 
-  // ── Web server (porta 80) ──────────────────────────────────────────────
+  // ── fauxmoESP — server standalone porta 80 ────────────────────────────
+  // createServer(true) = fauxmo crea e gestisce il suo server HTTP su porta 80
+  fauxmo.createServer(true);
+  fauxmo.setPort(80);
+  fauxmo.enable(true);
+
+  // Aggiungi le 6 antenne
+  for (int i = 0; i < NUM_ANTENNAS; i++) {
+    fauxmo.addDevice(antennaNames[i].c_str());
+    Serial.println("[ALEXA] Device [" + String(i) + "]: " + antennaNames[i]);
+  }
+  // Device speciale indice 6: "Antenne" → spegni tutto
+  fauxmo.addDevice("Antenne");
+  Serial.println("[ALEXA] Device [6]: Antenne (spegni tutto)");
+
+  // Callback unico con device_id
+  fauxmo.onSetState([](unsigned char device_id, const char* device_name, bool state, unsigned char value) {
+    Serial.printf("[ALEXA] id=%d name=%s state=%s\n", device_id, device_name, state ? "ON" : "OFF");
+    if (device_id < NUM_ANTENNAS) {
+      if (state) selectAntenna(device_id);
+      else       selectAntenna(-1);
+    } else {
+      // "Antenne" → spegni tutto
+      selectAntenna(-1);
+    }
+  });
+
+  // ── WebServer porta 8080 ───────────────────────────────────────────────
   server.on("/",       HTTP_GET, []() { server.send_P(200, "text/html", HTML_PAGE); });
   server.on("/status", HTTP_GET, handleStatus);
   server.on("/sel",    HTTP_GET, handleSelect);
   server.on("/wifi",   HTTP_GET, handleWiFi);
   server.on("/scan",   HTTP_GET, handleScan);
   server.on("/rename", HTTP_GET, handleRename);
-  // DEVE essere ULTIMO — passa le richieste Alexa/SSDP a Espalexa
-  server.onNotFound([]() {
-    if (!espalexa.handleAlexaApiCall(server.uri(), server.arg("plain")))
-      server.send(404, "text/plain", "Not found");
-  });
-
-  // ── Alexa ──────────────────────────────────────────────────────────────
-  setupAlexaDevices();
-  espalexa.begin(&server);  // condivide WebServer porta 80
   server.begin();
-  Serial.println("[WEB] HTTP server avviato su porta 80");
+  Serial.println("[WEB] HTTP server avviato su porta 8080");
 
-  // ── TCP server per Processing (porta 8080) ────────────────────────────
+  // ── TCP server porta 8181 per Processing ──────────────────────────────
   tcpServer.begin();
-  Serial.println("[TCP] TCP server avviato su porta 8080");
+  Serial.println("[TCP] TCP server avviato su porta 8181");
 
   // Ripristina antenna salvata
   if (selectedAntenna >= 0 && selectedAntenna < NUM_ANTENNAS)
@@ -600,10 +568,10 @@ void setup() {
 
   Serial.println("═══════════════════════════════════════");
   Serial.println("  SISTEMA PRONTO!");
-  Serial.println("  Web:       http://192.168.4.1");
-  if (staConnected) { Serial.print("  Web:       http://"); Serial.println(WiFi.localIP()); }
-  Serial.println("  Processing TCP: IP:8080");
-  Serial.println("  Poi dì:    Alexa, trova dispositivi");
+  Serial.println("  Web:       http://192.168.4.1:8080");
+  if (staConnected) { Serial.print("  Web:       http://"); Serial.print(WiFi.localIP()); Serial.println(":8080"); }
+  Serial.println("  TCP Processing: IP:8181");
+  Serial.println("  Poi: Alexa, trova dispositivi");
   Serial.println("═══════════════════════════════════════");
 }
 
@@ -612,9 +580,9 @@ void setup() {
 // ══════════════════════════════════════════════════════════════════════════
 
 void loop() {
-  espalexa.loop();       // discovery SSDP Alexa
-  server.handleClient(); // HTTP porta 80
-  handleTCP();           // TCP porta 8080 per Processing
+  fauxmo.handle();       // Alexa discovery e comandi (porta 80)
+  server.handleClient(); // pagina web (porta 8080)
+  handleTCP();           // Processing TCP (porta 8181)
   handleSerial();        // comandi USB seriale
   updateWiFi();          // riconnessione router
   updateLED();           // LED stato
